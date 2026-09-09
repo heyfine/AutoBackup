@@ -31,13 +31,15 @@ async function bootstrap(): Promise<{
   pipeline: Pipeline
   scheduler: Scheduler
   homeDir: string
+  secretsPath: string
 }> {
   const homeDir = process.env.AUTOBACKUP_HOME ?? process.cwd()
   mkdirSync(join(homeDir, 'artifacts'), { recursive: true })
   mkdirSync(join(homeDir, 'logs'), { recursive: true })
 
   const store = new Store(join(homeDir, 'autobackup.db'))
-  const secrets = new Secrets(resolveSecretsPath(homeDir))
+  const secretsPath = resolveSecretsPath(homeDir)
+  const secrets = new Secrets(secretsPath)
   const notifier = new BarkNotifier(secrets.getOptional('BARK_URL'))
   const pipeline = new Pipeline({ store, secrets, homeDir, notify: notifier, toolVersion: TOOL_VERSION })
   const scheduler = new Scheduler(store, pipeline, () => {
@@ -45,7 +47,7 @@ async function bootstrap(): Promise<{
     const end = process.env.AUTOBACKUP_WINDOW_END ?? '300' // 05:00
     return { startMin: Number(start), endMin: Number(end) }
   })
-  return { store, secrets, pipeline, scheduler, homeDir }
+  return { store, secrets, pipeline, scheduler, homeDir, secretsPath }
 }
 
 async function main(): Promise<void> {
@@ -107,12 +109,21 @@ async function main(): Promise<void> {
       break
     }
     case 'serve': {
-      console.log(`AutoBackup ${TOOL_VERSION} serve mode — Web API arrives in M3; scheduler active.`)
       await ctx.pipeline.recoverStaleRuns()
       ctx.scheduler.start()
+      const { startApi } = await import('./server.js')
+      const api = await startApi({
+        store: ctx.store,
+        pipeline: ctx.pipeline,
+        scheduler: ctx.scheduler,
+        secrets: ctx.secrets,
+        secretsPath: ctx.secretsPath,
+        port: Number(process.env.AUTOBACKUP_PORT ?? 8199),
+      })
       const shutdown = (): void => {
         console.log('\nshutting down...')
         ctx.scheduler.stop()
+        void api.stop()
         ctx.store.close()
         process.exit(0)
       }

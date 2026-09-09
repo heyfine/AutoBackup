@@ -1,0 +1,301 @@
+import Fastify from 'fastify'
+import fastifyStatic from '@fastify/static'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
+import type { Store } from './store/db.js'
+import type { Pipeline } from './core/pipeline.js'
+import type { Scheduler } from './core/scheduler.js'
+import type { Secrets } from './core/secrets.js'
+import type { AppProfile, BackupTarget, RunRecord } from './types.js'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+
+/**
+ * Web API（M3）：单管理员 session 认证 + SSE 进度。
+ * 安全（评审 D5/designer 方案）：GET 永不返回密码；登录限频；cookie HttpOnly+SameSite。
+ */
+export interface ApiDeps {
+  store: Store
+  pipeline: Pipeline
+  scheduler: Scheduler
+  secrets: Secrets
+  secretsPath: string
+  port: number
+}
+
+const SESSION_TTL_MS = 30 * 24 * 3600 * 1000 // designer 方案：30 天记住设备
+
+interface Session {
+  token: string
+  expiresAt: number
+}
+
+export class AdminAuth {
+  private sessions = new Map<string, Session>()
+  private loginAttempts: { count: number; resetAt: number } = { count: 0, resetAt: 0 }
+  readonly passwordFile: string
+
+  constructor(private readonly homeDir: string) {
+    this.passwordFile = join(homeDir, 'admin-password.txt')
+  }
+
+  /** 首启生成随机密码；返回明文（仅此一次可读，打印到日志） */
+  ensurePassword(): string | null {
+    if (existsSync(this.passwordFile)) return null
+    const pwd = randomBytes(9).toString('base64url')
+    writeFileSync(this.passwordFile, pwd, { mode: 0o600 })
+    return pwd
+  }
+
+  verify(input: string): boolean {
+    // 登录限频：10 分钟窗口 5 次
+    const now = Date.now()
+    if (now < this.loginAttempts.resetAt && this.loginAttempts.count >= 5) return false
+    const stored = readFileSync(this.passwordFile, 'utf8').trim()
+    const a = Buffer.from(input)
+    const b = Buffer.from(stored)
+    const ok = a.length === b.length && timingSafeEqual(a, b)
+    if (now >= this.loginAttempts.resetAt) {
+      this.loginAttempts = { count: 0, resetAt: now + 10 * 60 * 1000 }
+    }
+    if (!ok) this.loginAttempts.count++
+    return ok
+  }
+
+  changePassword(oldPwd: string, newPwd: string): boolean {
+    if (!this.verify(oldPwd)) return false
+    if (newPwd.length < 8) return false
+    // 原子写（评审 D5：tempfile+rename）
+    const tmp = `${this.passwordFile}.tmp`
+    writeFileSync(tmp, newPwd, { mode: 0o600 })
+    renameSync(tmp, this.passwordFile)
+    this.sessions.clear() // 全端登出
+    return true
+  }
+
+  createSession(): string {
+    const token = randomBytes(24).toString('base64url')
+    this.sessions.set(token, { token, expiresAt: Date.now() + SESSION_TTL_MS })
+    return token
+  }
+
+  isValid(token: string | undefined): boolean {
+    if (!token) return false
+    const s = this.sessions.get(token)
+    if (!s) return false
+    if (s.expiresAt < Date.now()) {
+      this.sessions.delete(token)
+      return false
+    }
+    return true
+  }
+}
+
+export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: AdminAuth; stop: () => Promise<void> }> {
+  const { store, scheduler, secrets, secretsPath, port } = deps
+  const auth = new AdminAuth(process.env.AUTOBACKUP_HOME ?? process.cwd())
+  const initialPassword = auth.ensurePassword()
+  if (initialPassword) {
+    console.log(`[autobackup] 初始管理员密码（仅显示一次，请立即登录修改）: ${initialPassword}`)
+  }
+
+  const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 })
+
+  // 认证钩子：/auth/*、/health、静态资源之外全部要求 session
+  app.addHook('onRequest', async (req, reply) => {
+    const path = req.url.split('?')[0] ?? ''
+    if (path.startsWith('/auth/') || path === '/health' || path === '/' || path.startsWith('/assets/')) return
+    const cookie = req.headers.cookie ?? ''
+    const token = cookie.split(';').map((c) => c.trim()).find((c) => c.startsWith('ab_session='))?.slice('ab_session='.length)
+    if (!auth.isValid(token)) {
+      await reply.code(401).send({ error: 'unauthorized' })
+    }
+  })
+
+  // ---- auth ----
+  app.post('/auth/login', async (req, reply) => {
+    const { password } = (req.body ?? {}) as { password?: string }
+    if (!password || !auth.verify(password)) {
+      await reply.code(401).send({ error: '密码错误' })
+      return
+    }
+    const token = auth.createSession()
+    reply.header(
+      'Set-Cookie',
+      `ab_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`,
+    )
+    return { ok: true }
+  })
+
+  app.post('/auth/logout', async (req, reply) => {
+    const cookie = req.headers.cookie ?? ''
+    const token = cookie.split(';').map((c) => c.trim()).find((c) => c.startsWith('ab_session='))?.slice('ab_session='.length)
+    if (token) {
+      ;(auth as unknown as { sessions: Map<string, Session> }).sessions.delete(token)
+    }
+    reply.header('Set-Cookie', 'ab_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0')
+    return { ok: true }
+  })
+
+  app.post('/auth/change-password', async (req, reply) => {
+    const { oldPassword, newPassword } = (req.body ?? {}) as { oldPassword?: string; newPassword?: string }
+    if (!oldPassword || !newPassword || !auth.changePassword(oldPassword, newPassword)) {
+      await reply.code(400).send({ error: '修改失败（旧密码错误或新密码不足 8 位）' })
+      return
+    }
+    return { ok: true }
+  })
+
+  app.get('/health', async () => ({ ok: true, version: '0.1.0' }))
+  // ---- profiles（只读 + 手动触发；M3 不做档案编辑 UI）----
+  app.get('/api/profiles', async () => {
+    const profiles = store.listProfiles({ includeDrafts: true })
+    const result = profiles.map((p: AppProfile) => {
+      const runs = store.listRuns(p.id, 3)
+      return { ...p, passwordRef: p.passwordRef ? '***' : undefined, recentRuns: runs.map(pickRunPublic) }
+    })
+    return { profiles: result }
+  })
+
+  app.post('/api/profiles/:id/run', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    try {
+      const run = (await scheduler.runNow(id)) as RunRecord
+      return pickRunPublic(run)
+    } catch (err) {
+      await reply.code(409).send({ error: err instanceof Error ? err.message : String(err) })
+    }
+  })
+
+  // ---- targets（凭据只回 has_password）----
+  app.get('/api/targets', async () => {
+    const targets = store.listTargets(false)
+    return { targets: targets.map((t: BackupTarget) => ({ ...t, passwordRef: '***' as const, hasPassword: secrets.has(t.passwordRef) })) }
+  })
+
+  app.post('/api/targets/:id/credentials', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const { username, password } = (req.body ?? {}) as { username?: string; password?: string }
+    const target = store.getTarget(id)
+    if (!target) {
+      await reply.code(404).send({ error: 'target not found' })
+      return
+    }
+    // 原子写 secrets.env（评审 D5）
+    const lines = readFileSync(secretsPath, 'utf8').split(/\r?\n/)
+    const userKey = `WEBDAV_${id.toUpperCase().replace(/-/g, '_')}_USER`
+    const passKey = target.passwordRef
+    const updated: string[] = []
+    let wroteUser = false
+    let wrotePass = false
+    for (const line of lines) {
+      const key = line.split('=')[0]?.trim()
+      if (key === userKey) { updated.push(`${userKey}=${username ?? ''}`); wroteUser = true }
+      else if (key === passKey) { updated.push(`${passKey}=${password ?? ''}`); wrotePass = true }
+      else updated.push(line)
+    }
+    if (!wroteUser && username) updated.push(`${userKey}=${username}`)
+    if (!wrotePass && password) updated.push(`${passKey}=${password}`)
+    const tmp = `${secretsPath}.tmp`
+    writeFileSync(tmp, updated.join('\n'), { mode: 0o600 })
+    renameSync(tmp, secretsPath)
+    // 内存 secrets 同步刷新
+    ;(secrets as unknown as { values: Map<string, string> }).values.set(userKey, username ?? '')
+    ;(secrets as unknown as { values: Map<string, string> }).values.set(passKey, password ?? '')
+    if (username) {
+      const t = { ...target, username }
+      store.upsertTarget(t)
+    }
+    return { ok: true }
+  })
+
+  // ---- runs ----
+  app.get('/api/runs', async (req) => {
+    const q = req.query as { profileId?: string; limit?: string }
+    const runs = store.listRuns(q.profileId, Math.min(Number(q.limit ?? 50), 200))
+    return { runs: runs.map(pickRunPublic) }
+  })
+
+  // ---- SSE 事件流（仪表盘实时刷新，designer 方案：SSE 不用 WebSocket）----
+  const sseClients = new Set<FastifyReplyLike>()
+  app.get('/api/events', async (req, reply) => {
+    const raw = reply.raw
+    raw.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+    })
+    raw.write(`event: hello\ndata: connected\n\n`)
+    sseClients.add(reply as FastifyReplyLike)
+    req.raw.on('close', () => sseClients.delete(reply as FastifyReplyLike))
+    // 心跳防超时
+    const hb = setInterval(() => raw.write(`: hb\n\n`), 25_000)
+    req.raw.on('close', () => clearInterval(hb))
+    await new Promise(() => {}) // 保持连接
+  })
+
+  /** SSE 广播（run 状态变化时由 pipeline 调用） */
+  function broadcast(event: string, data: unknown): void {
+    for (const client of sseClients) {
+      try {
+        client.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`)
+      } catch {
+        sseClients.delete(client)
+      }
+    }
+  }
+  // 供 pipeline 集成（M3 后续：pipeline 事件挂钩）；先导出避免未使用告警
+  void broadcast
+
+  // 静态 UI（M3 构建产物）
+  const webDist = join(__dirname, '../../web/dist')
+  if (existsSync(webDist)) {
+    await app.register(fastifyStatic, { root: webDist })
+    app.setNotFoundHandler(async (req, reply) => {
+      const path = req.url.split('?')[0] ?? ''
+      if (path.startsWith('/api/') || path.startsWith('/auth/')) {
+        await reply.code(404).send({ error: 'not found' })
+        return
+      }
+      await reply.sendFile('index.html')
+    })
+  }
+
+  await app.listen({ port, host: '127.0.0.1' })
+  console.log(`[autobackup] Web UI: http://127.0.0.1:${port} (webDist ${existsSync(webDist) ? 'loaded' : 'MISSING — run web build'})`)
+
+  return {
+    port,
+    auth,
+    stop: async () => {
+      await app.close()
+    },
+  }
+}
+
+interface FastifyReplyLike {
+  raw: { write: (s: string) => void }
+}
+
+function pickRunPublic(r: RunRecord): Record<string, unknown> {
+  return {
+    id: r.id,
+    profileId: r.profileId,
+    trigger: r.trigger,
+    status: r.status,
+    stage: r.stage,
+    startedAt: r.startedAt,
+    finishedAt: r.finishedAt,
+    durationMs: r.durationMs,
+    sizeBytes: r.sizeBytes,
+    sha256: r.sha256,
+    encrypted: r.encrypted,
+    pushes: r.pushes,
+    error: r.error,
+  }
+}
+
+// Fastify reply cookie 类型（避免引入额外类型包）
+
