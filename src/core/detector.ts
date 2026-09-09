@@ -38,7 +38,7 @@ const FINGERPRINTS: {
   },
   {
     match: /mariadb|mysql/i,
-    suggest: (c, mounts) => ({
+    suggest: (c, _mounts) => ({
       name: 'MySQL/MariaDB 数据库',
       kind: 'mariadb',
       paths: [],

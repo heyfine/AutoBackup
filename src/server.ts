@@ -8,7 +8,7 @@ import type { Store } from './store/db.js'
 import type { Pipeline } from './core/pipeline.js'
 import type { Scheduler } from './core/scheduler.js'
 import type { Secrets } from './core/secrets.js'
-import type { AppProfile, BackupTarget, RunRecord } from './types.js'
+import type { AppProfile, BackupTarget, DetectedDraft, RunRecord } from './types.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -237,7 +237,7 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
 
   /** 一键采纳 detector 草稿（确认后建档案，enabled=false 由用户再开） */
   app.post('/api/profiles/adopt', async (req, reply) => {
-    const body = (req.body ?? {}) as { draft: import('./types.js').DetectedDraft; overrides?: Partial<AppProfile> }
+    const body = (req.body ?? {}) as { draft: DetectedDraft; overrides?: Partial<AppProfile> }
     const d = body.draft
     if (!d?.containerName || !d.suggestedProfile) {
       await reply.code(400).send({ error: 'draft 数据不完整' })
@@ -423,6 +423,89 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
       store.upsertTarget({ ...target, username })
     }
     return { ok: true }
+  })
+
+  // ---- restore（还原，方案 D4 / 用户需求）----
+  /** 某档案可还原的本地快照列表 */
+  app.get('/api/profiles/:id/artifacts', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const profile = store.getProfile(id)
+    if (!profile) {
+      await reply.code(404).send({ error: 'profile not found' })
+      return
+    }
+    const homeDir = process.env.AUTOBACKUP_HOME ?? process.cwd()
+    const artifacts = store
+      .listRuns(id, 30)
+      .filter((r) => r.localPath && r.status === 'success')
+      .map((r) => ({
+        runId: r.id,
+        artifactPath: r.localPath,
+        sizeBytes: r.sizeBytes,
+        sha256: r.sha256,
+        encrypted: r.encrypted,
+        startedAt: r.startedAt,
+        exists: existsSync(r.localPath as string),
+      }))
+    void homeDir
+    return { artifacts }
+  })
+
+  /** 还原（preview 解包预览 / inplace 正式覆盖，RED 级确认） */
+  app.post('/api/profiles/:id/restore', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const body = (req.body ?? {}) as { runId?: string; artifactPath?: string; mode?: 'preview' | 'inplace'; confirmName?: string }
+    const profile = store.getProfile(id)
+    if (!profile) {
+      await reply.code(404).send({ error: 'profile not found' })
+      return
+    }
+    // 找 artifact：优先 runId，其次直接路径
+    let artifactPath = body.artifactPath
+    if (!artifactPath && body.runId) {
+      const run = store.getRun(body.runId)
+      artifactPath = run?.localPath
+    }
+    if (!artifactPath || !existsSync(artifactPath)) {
+      await reply.code(400).send({ error: 'artifact 不存在（本地文件已被清理？）' })
+      return
+    }
+    const mode = body.mode === 'inplace' ? 'inplace' : 'preview'
+    if (mode === 'inplace' && body.confirmName !== profile.name) {
+      await reply.code(400).send({ error: `RED 级确认失败：请输入档案名「${profile.name}」原文` })
+      return
+    }
+    const { restoreProfile, auditRestore } = await import('./core/restore.js')
+    const homeDir = process.env.AUTOBACKUP_HOME ?? process.cwd()
+    try {
+      const result = await restoreProfile(profile, artifactPath, {
+        mode,
+        confirmName: body.confirmName,
+        ageKeyPath: secrets.getOptional('AGE_KEY_PATH') ?? join(homeDir, 'secrets.d/age.key.txt'),
+        homeDir,
+      })
+      await auditRestore(homeDir, {
+        profileId: id,
+        runId: body.runId,
+        mode,
+        operator: 'web-admin',
+        result: 'ok',
+      })
+      return result
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      await auditRestore(homeDir, { profileId: id, runId: body.runId, mode, operator: 'web-admin', result: 'failed', error: message })
+      await reply.code(500).send({ error: message })
+    }
+  })
+
+  /** 还原审计日志（只增不改） */
+  app.get('/api/restore-audit', async () => {
+    const homeDir = process.env.AUTOBACKUP_HOME ?? process.cwd()
+    const auditPath = join(homeDir, 'logs', 'restore-audit.jsonl')
+    if (!existsSync(auditPath)) return { entries: [] }
+    const lines = readFileSync(auditPath, 'utf8').trim().split('\n').filter(Boolean)
+    return { entries: lines.slice(-100).map((l) => JSON.parse(l) as unknown) }
   })
 
   // ---- runs ----

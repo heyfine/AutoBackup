@@ -142,6 +142,21 @@ main { max-width: 1080px; margin: 0 auto; padding: 20px 16px; }
 }
 .check-row { display: flex; gap: 16px; flex-wrap: wrap; margin: 10px 0; }
 .check-item { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+
+/* 还原弹窗 */
+.modal-mask {
+  position: fixed; inset: 0; background: rgba(0,0,0,0.45);
+  display: flex; align-items: center; justify-content: center; z-index: 100; padding: 16px;
+}
+.modal { max-height: 86vh; overflow-y: auto; }
+.snapshot-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0; max-height: 240px; overflow-y: auto; }
+.snapshot-item { display: flex; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 13px; }
+.snapshot-item:has(input:checked) { border-color: var(--accent); }
+.steps { padding-left: 20px; line-height: 1.9; font-size: 13px; }
+.red-zone { border: 2px solid var(--bad); border-radius: 10px; padding: 14px; margin-top: 12px; background: var(--bad-bg); }
+.red-title { color: var(--bad); font-weight: 700; margin-bottom: 8px; }
+.red-zone input { width: 100%; margin: 8px 0; background: var(--card); }
+.danger-solid { background: var(--bad) !important; }
 .btn-row { display: flex; gap: 8px; margin-top: 10px; }
 .editor { max-width: 860px; }
 button.danger { color: var(--bad); }

@@ -243,6 +243,7 @@ function Profiles() {
   const [drafts, setDrafts] = useState<import('./types').DetectedDraft[]>([])
   const [scanning, setScanning] = useState(false)
   const [scanInfo, setScanInfo] = useState('')
+  const [restoring, setRestoring] = useState<Profile | null>(null)
 
   const load = async () => {
     const [pr, tg] = await Promise.all([
@@ -494,12 +495,14 @@ function Profiles() {
               {last?.error && <div class="card-err">{last.error}</div>}
               <div class="btn-row">
                 <button class="ghost sm" onClick={() => startEdit(p)}>编辑</button>
+                <button class="ghost sm" onClick={() => setRestoring(p)}>还原</button>
                 <button class="ghost sm danger" onClick={() => remove(p.id)}>删除</button>
               </div>
             </div>
           )
         })}
       </div>
+      {restoring && <RestoreDialog profile={restoring} onClose={() => { setRestoring(null); load() }} />}
     </div>
   )
 }
@@ -515,6 +518,118 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
     >
       <span class="knob" />
     </span>
+  )
+}
+
+// ---- Restore（还原流程：选快照 → 预览 or RED 确认覆盖） ----
+interface ArtifactInfo {
+  runId: string
+  artifactPath: string
+  sizeBytes?: number
+  encrypted: boolean
+  startedAt: string
+  exists: boolean
+}
+
+function RestoreDialog({ profile, onClose }: { profile: Profile; onClose: () => void }) {
+  const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([])
+  const [selected, setSelected] = useState<ArtifactInfo | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<{ steps: string[]; previewDir?: string; preRestoreBackup?: string; mode: string } | null>(null)
+  const [err, setErr] = useState('')
+  const [confirmText, setConfirmText] = useState('')
+  const [showInplace, setShowInplace] = useState(false)
+
+  useEffect(() => {
+    api<{ artifacts: ArtifactInfo[] }>(`/api/profiles/${profile.id}/artifacts`)
+      .then((r) => {
+        setArtifacts(r.artifacts)
+        setSelected(r.artifacts[0] ?? null)
+      })
+      .catch((ex) => setErr(ex instanceof Error ? ex.message : String(ex)))
+  }, [profile.id])
+
+  const doRestore = async (mode: 'preview' | 'inplace') => {
+    if (!selected) return
+    setBusy(true)
+    setErr('')
+    try {
+      const r = await api<{ steps: string[]; previewDir?: string; preRestoreBackup?: string; mode: string }>(
+        `/api/profiles/${profile.id}/restore`,
+        { method: 'POST', body: JSON.stringify({ runId: selected.runId, mode, confirmName: mode === 'inplace' ? confirmText : undefined }) },
+      )
+      setResult(r)
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div class="modal-mask" onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div class="card wide editor modal">
+        <div class="card-head">
+          <span class="name">还原：{profile.name}</span>
+          <button class="ghost sm" onClick={onClose}>✕</button>
+        </div>
+
+        {result ? (
+          <div>
+            <div class={`statusbar ${result.mode === 'preview' ? 'ok' : 'ok'}`}>
+              {result.mode === 'preview' ? '✅ 预览解包完成（生产数据未动）' : '✅ 正式还原完成'}
+            </div>
+            <ol class="steps">
+              {result.steps.map((s, i) => (
+                <li key={i}>{s}</li>
+              ))}
+            </ol>
+            {result.preRestoreBackup && (
+              <div class="banner-ok">还原前数据已兜底：{result.preRestoreBackup}（如需回退可手动拷回）</div>
+            )}
+            <div class="btn-row">
+              <button onClick={onClose}>关闭</button>
+            </div>
+          </div>
+        ) : (
+          <div>
+            <p class="muted">选择要还原的本地快照（仅显示本地 artifact 还存在的）：</p>
+            {artifacts.length === 0 && <div class="muted">没有可用的本地快照。远端 WebDAV 上的备份请下载后放入 artifacts/ 目录。</div>}
+            <div class="snapshot-list">
+              {artifacts.map((a) => (
+                <label class={`snapshot-item ${!a.exists ? 'muted' : ''}`} key={a.runId}>
+                  <input type="radio" name="snap" checked={selected?.runId === a.runId} disabled={!a.exists} onChange={() => setSelected(a)} />
+                  <span>{fmtTime(a.startedAt)}</span>
+                  <span class="muted">{fmtSize(a.sizeBytes)}{a.encrypted ? ' 🔒' : ''}{!a.exists ? ' · 文件缺失' : ''}</span>
+                </label>
+              ))}
+            </div>
+
+            {err && <div class="banner-err">{err}</div>}
+
+            {!showInplace ? (
+              <div class="btn-row">
+                <button disabled={!selected || busy} onClick={() => doRestore('preview')}>{busy ? '解包中…' : '📦 预览解包（不动生产数据）'}</button>
+                <button class="danger-solid" disabled={!selected || busy} onClick={() => setShowInplace(true)}>⚠️ 正式还原（覆盖）</button>
+              </div>
+            ) : (
+              <div class="red-zone">
+                <div class="red-title">RED 级操作：正式还原将覆盖当前数据</div>
+                <p>将覆盖档案「<strong>{profile.name}</strong>」的现有数据（还原前会自动做兜底备份）。</p>
+                <p>请输入档案名 <strong>{profile.name}</strong> 确认：</p>
+                <input value={confirmText} onInput={(e) => setConfirmText((e.target as HTMLInputElement).value)} placeholder={profile.name} />
+                <div class="btn-row">
+                  <button class="danger-solid" disabled={confirmText !== profile.name || busy} onClick={() => doRestore('inplace')}>
+                    {busy ? '还原中…' : '我已知晓风险，执行还原'}
+                  </button>
+                  <button class="ghost" onClick={() => setShowInplace(false)}>返回</button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
