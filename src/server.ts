@@ -3,7 +3,7 @@ import fastifyStatic from '@fastify/static'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, renameSync, createReadStream } from 'node:fs'
 import type { Store } from './store/db.js'
 import type { Pipeline } from './core/pipeline.js'
 import type { Scheduler } from './core/scheduler.js'
@@ -426,6 +426,50 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
   })
 
   // ---- restore（还原，方案 D4 / 用户需求）----
+  /** 下载 artifact 到本地设备（浏览器下载流；用户需求：备份下载到我的设备） */
+  app.get('/api/artifacts/download', async (req, reply) => {
+    const q = req.query as { runId?: string; path?: string }
+    const homeDir = process.env.AUTOBACKUP_HOME ?? process.cwd()
+    let artifactPath = q.path
+    if (q.runId) {
+      const run = store.getRun(q.runId)
+      artifactPath = run?.localPath
+    }
+    if (!artifactPath || !existsSync(artifactPath)) {
+      await reply.code(404).send({ error: 'artifact 不存在' })
+      return
+    }
+    // 路径安全：只允许 homeDir 内的文件（防目录穿越拿任意文件）
+    const normalized = join(artifactPath)
+    if (!normalized.startsWith(homeDir)) {
+      await reply.code(403).send({ error: 'forbidden' })
+      return
+    }
+    const fileName = artifactPath.split(/[\\/]/).pop() ?? 'backup.tar.gz'
+    const manifestPath = artifactPath.replace(/\.tar\.gz(\.age)?$/, '.manifest.json')
+    if (req.headers.range) {
+      // 大文件支持断点（浏览器下载一般不用，但 curl/wget 会用）
+      const range = req.headers.range
+      const fsMod = await import('node:fs')
+      const size = fsMod.statSync(artifactPath).size
+      const m = /bytes=(\d*)-(\d*)/.exec(range)
+      const start = m?.[1] ? Number(m[1]) : 0
+      const end = m?.[2] ? Number(m[2]) : size - 1
+      const stream = fsMod.createReadStream(artifactPath, { start, end })
+      reply.header('Content-Range', `bytes ${start}-${end}/${size}`)
+      reply.header('Accept-Ranges', 'bytes')
+      reply.header('Content-Length', String(end - start + 1))
+      reply.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`)
+      reply.code(206)
+      return reply.send(stream)
+    }
+    reply.header('Content-Disposition', `attachment; filename*=UTF-8''${encodeURIComponent(fileName)}`)
+    reply.header('Accept-Ranges', 'bytes')
+    // manifest 伴随提示由 UI 侧单独下载
+    void manifestPath
+    return reply.send(createReadStream(artifactPath))
+  })
+
   /** 某档案可还原的本地快照列表 */
   app.get('/api/profiles/:id/artifacts', async (req, reply) => {
     const { id } = req.params as { id: string }

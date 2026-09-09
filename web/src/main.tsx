@@ -597,11 +597,19 @@ function RestoreDialog({ profile, onClose }: { profile: Profile; onClose: () => 
             {artifacts.length === 0 && <div class="muted">没有可用的本地快照。远端 WebDAV 上的备份请下载后放入 artifacts/ 目录。</div>}
             <div class="snapshot-list">
               {artifacts.map((a) => (
-                <label class={`snapshot-item ${!a.exists ? 'muted' : ''}`} key={a.runId}>
-                  <input type="radio" name="snap" checked={selected?.runId === a.runId} disabled={!a.exists} onChange={() => setSelected(a)} />
-                  <span>{fmtTime(a.startedAt)}</span>
-                  <span class="muted">{fmtSize(a.sizeBytes)}{a.encrypted ? ' 🔒' : ''}{!a.exists ? ' · 文件缺失' : ''}</span>
-                </label>
+                <div class={`snapshot-item ${!a.exists ? 'muted' : ''}`} key={a.runId}>
+                  <label style="display:flex;gap:10px;align-items:center;flex:1;cursor:pointer">
+                    <input type="radio" name="snap" checked={selected?.runId === a.runId} disabled={!a.exists} onChange={() => setSelected(a)} />
+                    <span>{fmtTime(a.startedAt)}</span>
+                    <span class="muted">{fmtSize(a.sizeBytes)}{a.encrypted ? ' 🔒' : ''}{!a.exists ? ' · 文件缺失' : ''}</span>
+                  </label>
+                  {a.exists && (
+                    <span class="dl-links">
+                      <a href={`/api/artifacts/download?runId=${encodeURIComponent(a.runId)}`} class="ghost sm dl-btn" title="下载备份包">⬇ 包</a>
+                      <a href={`/api/artifacts/download?path=${encodeURIComponent(a.artifactPath.replace(/\.tar\.gz(\.age)?$/, '.manifest.json'))}`} class="ghost sm dl-btn" title="下载清单">清单</a>
+                    </span>
+                  )}
+                </div>
               ))}
             </div>
 
