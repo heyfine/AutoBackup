@@ -237,6 +237,9 @@ function Profiles() {
   const [editing, setEditing] = useState<Profile | null>(null)
   const [isNew, setIsNew] = useState(false)
   const [msg, setMsg] = useState('')
+  const [drafts, setDrafts] = useState<import('./types').DetectedDraft[]>([])
+  const [scanning, setScanning] = useState(false)
+  const [scanInfo, setScanInfo] = useState('')
 
   const load = async () => {
     const [pr, tg] = await Promise.all([
@@ -250,6 +253,55 @@ function Profiles() {
     load()
   }, [])
 
+  /** 扫描新应用（docker 检测） */
+  const scan = async () => {
+    setScanning(true)
+    setScanInfo('')
+    try {
+      const r = await api<{ drafts: import('./types').DetectedDraft[]; scanned: number; error?: string }>('/api/detect', { method: 'POST' })
+      if (r.error) {
+        setScanInfo(`⚠️ ${r.error}`)
+        setDrafts([])
+      } else {
+        setDrafts(r.drafts)
+        setScanInfo(`扫描了 ${r.scanned} 个容器，发现 ${r.drafts.length} 个新应用`)
+      }
+    } catch (ex) {
+      setScanInfo(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
+    } finally {
+      setScanning(false)
+    }
+  }
+
+  /** 采纳草稿：建档案（默认停用），跳到编辑器让用户确认细节 */
+  const adopt = async (d: import('./types').DetectedDraft) => {
+    try {
+      const r = await api<{ profile: Profile }>('/api/profiles/adopt', {
+        method: 'POST',
+        body: JSON.stringify({ draft: d }),
+      })
+      setDrafts((s) => s.filter((x) => x.containerName !== d.containerName))
+      setMsg(`✅ 已添加「${r.profile.name}」（默认停用，请编辑确认后打开开关）`)
+      await load()
+      // 直接进入编辑器
+      setIsNew(true)
+      setEditing({ ...r.profile, recentRuns: [] })
+    } catch (ex) {
+      setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
+    }
+  }
+
+  /** iOS 风格启停开关 */
+  const toggle = async (p: Profile) => {
+    // 乐观更新
+    setProfiles((s) => s.map((x) => (x.id === p.id ? { ...x, enabled: !x.enabled } : x)))
+    try {
+      await api(`/api/profiles/${p.id}/toggle`, { method: 'POST' })
+    } catch {
+      await load() // 失败回滚
+    }
+  }
+
   const startEdit = (p: Profile | null) => {
     setIsNew(!p)
     setEditing(
@@ -262,7 +314,7 @@ function Profiles() {
             paths: [],
             containers: [],
             encrypt: false,
-            enabled: true,
+            enabled: false, // 新建默认停用（用户确认后自己开）
             isDraft: false,
             schedule: { mode: 'daily', at: '03:00' },
             targetIds: [],
@@ -380,10 +432,10 @@ function Profiles() {
         </div>
         <div class="check-row">
           <label class="check-item">
-            <input type="checkbox" checked={p.encrypt} onChange={(e) => upd({ encrypt: (e.target as HTMLInputElement).checked })} /> age 加密（敏感数据建议开）
+            <Toggle checked={p.encrypt} onChange={(v) => upd({ encrypt: v })} /> age 加密（敏感数据建议开）
           </label>
           <label class="check-item">
-            <input type="checkbox" checked={p.enabled} onChange={(e) => upd({ enabled: (e.target as HTMLInputElement).checked })} /> 启用
+            <Toggle checked={p.enabled} onChange={(v) => upd({ enabled: v })} /> 启用备份
           </label>
         </div>
         <div class="btn-row">
@@ -399,22 +451,44 @@ function Profiles() {
       {msg && <div class="banner-ok">{msg}</div>}
       <div class="toolbar">
         <button onClick={() => startEdit(null)}>＋ 新建档案</button>
+        <button class="ghost" disabled={scanning} onClick={scan}>{scanning ? '扫描中…' : '🔍 扫描新应用'}</button>
+        {scanInfo && <span class="muted" style="margin-left:10px">{scanInfo}</span>}
       </div>
+
+      {drafts.length > 0 && (
+        <div class="card wide detect-banner">
+          <div class="card-head"><span class="name">🆕 检测到 {drafts.length} 个新应用</span></div>
+          <p class="muted">已按指纹生成建议配置。采纳后默认<strong>停用</strong>——请编辑确认细节（库名/路径/频率）后再打开开关。</p>
+          {drafts.map((d) => (
+            <div class="detect-item" key={d.containerName}>
+              <div>
+                <strong>{d.suggestedProfile?.name ?? d.containerName}</strong>
+                <span class="muted"> · 容器 {d.containerName} · {d.image}</span>
+              </div>
+              <button class="ghost sm" onClick={() => adopt(d)}>采纳为档案</button>
+            </div>
+          ))}
+        </div>
+      )}
+
       <div class="cards">
         {profiles.map((p) => {
           const last = p.recentRuns[0]
           const cls = last?.status === 'success' ? 'ok' : last?.status === 'failed' ? 'bad' : 'idle'
           return (
-            <div class="card" key={p.id}>
+            <div class={`card ${p.enabled ? '' : 'card-off'}`} key={p.id}>
               <div class="card-head">
                 <span class="name">{p.name}</span>
                 {p.encrypt && <span class="badge">🔒</span>}
-                {!p.enabled && <span class="badge warn">停用</span>}
+                <span style="margin-left:auto">
+                  <Toggle checked={p.enabled} onChange={() => toggle(p)} />
+                </span>
               </div>
               <div class="card-meta">{p.kind} · {scheduleLabel(p.schedule)} · 保留 {p.keep} 份 · 目标 {p.targetIds.length === 0 ? '全部' : p.targetIds.length}</div>
               <div class="card-last">
-                {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)}</> : <span class="muted">从未备份</span>}
+                {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)} · {fmtSize(last.sizeBytes)}</> : <span class="muted">从未备份</span>}
               </div>
+              {last?.error && <div class="card-err">{last.error}</div>}
               <div class="btn-row">
                 <button class="ghost sm" onClick={() => startEdit(p)}>编辑</button>
                 <button class="ghost sm danger" onClick={() => remove(p.id)}>删除</button>
@@ -424,6 +498,20 @@ function Profiles() {
         })}
       </div>
     </div>
+  )
+}
+
+/** iOS 风格滑动开关 */
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <span
+      class={`ios-toggle ${checked ? 'on' : ''}`}
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+    >
+      <span class="knob" />
+    </span>
   )
 }
 

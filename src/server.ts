@@ -222,6 +222,64 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     return { ok: true }
   })
 
+  /** 启停开关（卡片 toggle） */
+  app.post('/api/profiles/:id/toggle', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const existing = store.getProfile(id)
+    if (!existing) {
+      await reply.code(404).send({ error: 'profile not found' })
+      return
+    }
+    const updated = { ...existing, enabled: !existing.enabled }
+    store.upsertProfile(updated)
+    return { profile: updated }
+  })
+
+  /** 一键采纳 detector 草稿（确认后建档案，enabled=false 由用户再开） */
+  app.post('/api/profiles/adopt', async (req, reply) => {
+    const body = (req.body ?? {}) as { draft: import('./types.js').DetectedDraft; overrides?: Partial<AppProfile> }
+    const d = body.draft
+    if (!d?.containerName || !d.suggestedProfile) {
+      await reply.code(400).send({ error: 'draft 数据不完整' })
+      return
+    }
+    const profile: AppProfile = {
+      id: `p_${Date.now().toString(36)}_${randomUUID().slice(0, 6)}`,
+      name: d.suggestedProfile.name ?? d.containerName,
+      kind: d.suggestedProfile.kind ?? 'directory',
+      paths: d.suggestedProfile.paths ?? [],
+      containers: d.suggestedProfile.containers ?? [d.containerName],
+      dbPath: d.suggestedProfile.dbPath,
+      database: d.suggestedProfile.database,
+      dbUser: d.suggestedProfile.dbUser,
+      dumpTool: d.suggestedProfile.dumpTool,
+      dumpArgs: d.suggestedProfile.dumpArgs,
+      encrypt: d.suggestedProfile.encrypt ?? false,
+      consistency: d.suggestedProfile.consistency ?? 'best_effort',
+      schedule: { mode: 'daily', at: '03:00' },
+      targetIds: [],
+      keep: 7,
+      enabled: false, // 采纳后默认停用，用户编辑确认后自己开启
+      isDraft: false,
+      ...body.overrides,
+    }
+    store.upsertProfile(profile)
+    return { profile }
+  })
+
+  /** 新应用检测（docker 容器 → 草稿建议） */
+  app.post('/api/detect', async () => {
+    const { detectContainers } = await import('./core/detector.js')
+    const profiles = store.listProfiles({ includeDrafts: true })
+    const covered = profiles.flatMap((p) => p.containers)
+    try {
+      const result = await detectContainers(covered)
+      return result
+    } catch (err) {
+      return { drafts: [], scanned: 0, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
   app.post('/api/profiles/:id/run', async (req, reply) => {
     const { id } = req.params as { id: string }
     try {
