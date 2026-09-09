@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+secrets.env
+secrets.*.env
+backups/
+artifacts/
+preview/
+*.db
+*.db-shm
+*.db-wal
+
+# 内部文档不进 git（按团队约定）
+docs/

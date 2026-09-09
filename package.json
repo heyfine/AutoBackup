@@ -1,0 +1,35 @@
+{
+  "name": "autobackup",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VPS 自动备份中心：检测应用 → 一致性快照 → 加密 → 多 WebDAV → 保留策略 → 告警 → 可验证还原",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src --max-warnings 0",
+    "test": "vitest run",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "dependencies": {
+    "@fastify/static": "^10.1.3",
+    "better-sqlite3": "^13.0.3",
+    "fastify": "^5.6.2",
+    "tar-stream": "^3.1.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^22.10.0",
+    "@types/tar-stream": "^3.1.4",
+    "eslint": "^9.39.2",
+    "prettier": "^3.7.4",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^3.2.4"
+  }
+}
