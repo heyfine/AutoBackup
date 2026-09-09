@@ -1,23 +1,23 @@
 import type { Store } from '../store/db.js'
-import type { AppProfile } from '../types.js'
+import type { AppProfile, ScheduleSpec } from '../types.js'
 import type { Pipeline } from './pipeline.js'
 
 /**
- * 调度器：每 30s tick，扫描 enabled 档案的 next_at（存 runs 台账 + apps.scheduleAt 推算）。
- * 全局并发 = 1（1C 机器，评审 D 系列决策）；每档案互斥（跳过本轮）。
- * 错峰：默认批次窗口 03:00-05:00，vaultwarden 类可用 scheduleAt 单独指定。
+ * 调度器：每 30s tick。
+ * 频率模型（产品化，用户确认）：
+ *  - daily: 每天 HH:mm 执行（错过窗口 5 分钟内补跑）
+ *  - interval: 每隔 N 小时执行（基于 lastRunAt 推算）
+ * 档案可绑定指定目标（targetIds 空=全部启用目标）；keep 为档案级保留份数。
+ * 全局并发 = 1；每档案互斥。
  */
 export class Scheduler {
   private running = false
   private inFlight = new Set<string>()
   private timer: NodeJS.Timeout | undefined
-  /** 上次每日批次日期（ISO date），确保每天只跑一轮 */
-  private lastBatchDate = ''
 
   constructor(
     private readonly store: Store,
     private readonly pipeline: Pipeline,
-    private readonly getWindow: () => { startMin: number; endMin: number },
   ) {}
 
   start(): void {
@@ -28,41 +28,45 @@ export class Scheduler {
     if (this.timer) clearInterval(this.timer)
   }
 
-  private nowMinutes(): number {
-    const d = new Date()
-    return d.getHours() * 60 + d.getMinutes()
+  /** 推算某档案下次应执行时刻（ms）； overdue = now >= next */
+  nextRunAt(p: AppProfile, now = Date.now()): number {
+    const last = p.lastRunAt ? new Date(p.lastRunAt).getTime() : 0
+    const s: ScheduleSpec = p.schedule
+    if (s.mode === 'interval') {
+      const intervalMs = Math.max(1, Math.min(168, s.hours)) * 3600 * 1000
+      // 无记录 → 立即；有记录 → last + interval
+      return last === 0 ? 0 : last + intervalMs
+    }
+    // daily "HH:mm"：今天的 at 时刻；若已过且 last 在其后，算明天
+    const [hh, mm] = s.at.split(':').map(Number)
+    const d = new Date(now)
+    d.setHours(hh ?? 3, mm ?? 0, 0, 0)
+    let todayAt = d.getTime()
+    if (todayAt <= now && last >= todayAt) {
+      todayAt += 24 * 3600 * 1000
+    }
+    return todayAt
   }
 
   private async tick(): Promise<void> {
     if (this.running) return
     this.running = true
     try {
-      const today = new Date().toISOString().slice(0, 10)
-      const win = this.getWindow()
-      const nowMin = this.nowMinutes()
-      const inWindow = nowMin >= win.startMin && nowMin <= win.endMin
-
+      const now = Date.now()
       const profiles = this.store.listProfiles()
       const due: AppProfile[] = []
       for (const p of profiles) {
-        if (this.inFlight.has(p.id)) continue // 每档案互斥
-        if (p.scheduleAt) {
-          // 自定义时刻：HH:mm 精确匹配（错过窗口 5 分钟内补跑）
-          const [hh, mm] = p.scheduleAt.split(':').map(Number)
-          if (hh === undefined || mm === undefined) continue
-          const target = hh * 60 + mm
-          if (nowMin >= target && nowMin <= target + 5) due.push(p)
-        } else if (inWindow) {
-          // 批次窗口内每天一次：查今天该 profile 是否已有 schedule 触发的成功/运行中 run
-          const runs = this.store.listRuns(p.id, 10)
-          const todayRun = runs.some(
-            (r) => r.trigger === 'schedule' && r.startedAt.slice(0, 10) === today && (r.status === 'success' || r.status === 'running'),
-          )
-          if (!todayRun) due.push(p)
+        if (this.inFlight.has(p.id)) continue
+        const next = this.nextRunAt(p, now)
+        if (now >= next && now - next < 6 * 3600 * 1000) {
+          // 到点执行；错过超过 6 小时的（如服务器停机数日）跳过本轮，防重启风暴——下轮 lastRunAt 更新后恢复
+          due.push(p)
+        } else if (next === 0) {
+          due.push(p) // interval 无记录 → 立即首跑
         }
       }
 
-      // 先轻后重排序（评审采纳：config → sqlite → db dump → 大目录）
+      // 先轻后重（评审采纳：config → sqlite → db dump → 大目录）
       const weight: Record<string, number> = { config: 0, sqlite: 1, mariadb: 2, postgres: 2, directory: 3 }
       due.sort((a, b) => (weight[a.kind] ?? 9) - (weight[b.kind] ?? 9))
 
@@ -80,7 +84,7 @@ export class Scheduler {
     }
   }
 
-  /** 手动立即备份（绕过窗口与互斥等待，但仍防同档案并发） */
+  /** 手动立即备份（绕过频率，但仍防同档案并发） */
   async runNow(profileId: string): Promise<unknown> {
     const p = this.store.getProfile(profileId)
     if (!p) throw new Error(`profile not found: ${profileId}`)

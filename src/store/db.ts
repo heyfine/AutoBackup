@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3'
+import { randomUUID } from 'node:crypto'
 import type { AppProfile, BackupTarget, RunRecord, PushRecord } from '../types.js'
 
 /**
@@ -27,6 +28,18 @@ export class Store {
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
         updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       );
+    `)
+    // 增量迁移：老库补列（targets.allow_unencrypted；表不存在时跳过，由下方 CREATE 处理）
+    const hasTargets = this.db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='targets'")
+      .get()
+    if (hasTargets) {
+      const targetCols = (this.db.pragma('table_info(targets)') as { name: string }[]).map((c) => c.name)
+      if (!targetCols.includes('allow_unencrypted')) {
+        this.db.exec('ALTER TABLE targets ADD COLUMN allow_unencrypted INTEGER NOT NULL DEFAULT 1')
+      }
+    }
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS targets (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
@@ -38,8 +51,10 @@ export class Store {
         capacity_quota_mb INTEGER,
         capacity_warn_pct INTEGER NOT NULL DEFAULT 85,
         timeout_min INTEGER NOT NULL DEFAULT 30,
+        allow_unencrypted INTEGER NOT NULL DEFAULT 1,
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
-      );
+      );`)
+    this.db.exec(`
       CREATE TABLE IF NOT EXISTS runs (
         id TEXT PRIMARY KEY,
         profile_id TEXT NOT NULL REFERENCES apps(id) ON DELETE CASCADE,
@@ -110,12 +125,12 @@ export class Store {
   upsertTarget(t: BackupTarget): void {
     this.db
       .prepare(
-        `INSERT INTO targets (id, name, url, username, password_ref, enabled, keep, capacity_quota_mb, capacity_warn_pct, timeout_min)
-         VALUES (@id, @name, @url, @username, @passwordRef, @enabled, @keep, @capacityQuotaMb, @capacityWarnPct, @timeoutMin)
+        `INSERT INTO targets (id, name, url, username, password_ref, enabled, keep, capacity_quota_mb, capacity_warn_pct, timeout_min, allow_unencrypted)
+         VALUES (@id, @name, @url, @username, @passwordRef, @enabled, @keep, @capacityQuotaMb, @capacityWarnPct, @timeoutMin, @allowUnencrypted)
          ON CONFLICT(id) DO UPDATE SET
            name=@name, url=@url, username=@username, password_ref=@passwordRef,
            enabled=@enabled, keep=@keep, capacity_quota_mb=@capacityQuotaMb,
-           capacity_warn_pct=@capacityWarnPct, timeout_min=@timeoutMin`,
+           capacity_warn_pct=@capacityWarnPct, timeout_min=@timeoutMin, allow_unencrypted=@allowUnencrypted`,
       )
       .run({
         id: t.id,
@@ -128,14 +143,19 @@ export class Store {
         capacityQuotaMb: t.capacityQuotaMb ?? null,
         capacityWarnPct: t.capacityWarnPct,
         timeoutMin: t.timeoutMin,
+        allowUnencrypted: t.allowUnencrypted ? 1 : 0,
       })
+  }
+
+  deleteTarget(id: string): void {
+    this.db.prepare('DELETE FROM targets WHERE id = ?').run(id)
   }
 
   listTargets(enabledOnly = true): BackupTarget[] {
     const rows = (
       enabledOnly
         ? this.db.prepare('SELECT * FROM targets WHERE enabled = 1 ORDER BY name')
-        : this.db.prepare('SELECT * FROM targets ORDER BY name')
+        : this.db.prepare('SELECT * FROM targets ORDER BY created_at')
     ).all() as Record<string, unknown>[]
     return rows.map(rowToTarget)
   }
@@ -145,6 +165,12 @@ export class Store {
       | Record<string, unknown>
       | undefined
     return row ? rowToTarget(row) : undefined
+  }
+
+  /** 新目标 id（password_ref 自动生成） */
+  newTargetId(_name: string): { id: string; passwordRef: string } {
+    const id = `t_${Date.now().toString(36)}_${randomUUID().slice(0, 6)}`
+    return { id, passwordRef: `WEBDAV_${id.toUpperCase().replace(/-/g, '_')}_PASS` }
   }
 
   // ---- runs ----
@@ -250,6 +276,7 @@ function rowToTarget(row: Record<string, unknown>): BackupTarget {
     capacityQuotaMb: (row.capacity_quota_mb as number | null) ?? undefined,
     capacityWarnPct: row.capacity_warn_pct as number,
     timeoutMin: row.timeout_min as number,
+    allowUnencrypted: row.allow_unencrypted !== 0,
   }
 }
 

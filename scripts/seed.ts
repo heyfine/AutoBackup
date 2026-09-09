@@ -25,6 +25,9 @@ const profile: AppProfile = {
   containers: [],
   encrypt: false,
   consistency: 'best_effort',
+  schedule: { mode: 'daily', at: '03:00' },
+  targetIds: [],
+  keep: 7,
   enabled: true,
   isDraft: false,
 }
@@ -41,6 +44,7 @@ const target: BackupTarget = {
   keep: 5,
   capacityWarnPct: 85,
   timeoutMin: 5,
+  allowUnencrypted: true,
 }
 store.upsertTarget(target)
 console.log('seeded: profile test-dir + target local-webdav (http://127.0.0.1:9800/backup)')

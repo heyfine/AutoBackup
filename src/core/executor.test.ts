@@ -51,6 +51,9 @@ describe('executor + packer (M1 核心)', () => {
       dbPath,
       encrypt: false,
       consistency: 'consistent',
+      schedule: { mode: 'daily', at: '03:00' },
+      targetIds: [],
+      keep: 7,
       enabled: true,
       isDraft: false,
     }
@@ -78,6 +81,9 @@ describe('executor + packer (M1 核心)', () => {
       containers: [],
       encrypt: false,
       consistency: 'best_effort',
+      schedule: { mode: 'daily', at: '03:00' },
+      targetIds: [],
+      keep: 7,
       enabled: true,
       isDraft: false,
     }
@@ -98,6 +104,9 @@ describe('executor + packer (M1 核心)', () => {
       containers: [],
       encrypt: false,
       consistency: 'best_effort',
+      schedule: { mode: 'daily', at: '03:00' },
+      targetIds: [],
+      keep: 7,
       enabled: true,
       isDraft: false,
     }
@@ -150,6 +159,9 @@ describe('executor + packer (M1 核心)', () => {
       containers: [],
       encrypt: true,
       consistency: 'best_effort',
+      schedule: { mode: 'daily', at: '03:00' },
+      targetIds: [],
+      keep: 7,
       enabled: true,
       isDraft: false,
     }
@@ -189,6 +201,9 @@ describe('executor + packer (M1 核心)', () => {
       containers: [],
       encrypt: false,
       consistency: 'best_effort',
+      schedule: { mode: 'daily', at: '03:00' },
+      targetIds: [],
+      keep: 7,
       enabled: true,
       isDraft: false,
     }
@@ -205,6 +220,7 @@ describe('executor + packer (M1 核心)', () => {
       keep: 7,
       capacityWarnPct: 85,
       timeoutMin: 30,
+      allowUnencrypted: true,
     }
     store.upsertTarget(target)
     expect(store.listTargets()[0]?.keep).toBe(7)

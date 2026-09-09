@@ -6,6 +6,11 @@ export type ProfileKind = 'sqlite' | 'mariadb' | 'postgres' | 'directory' | 'con
 /** 一致性等级 */
 export type ConsistencyLevel = 'consistent' | 'best_effort' | 'stop_service'
 
+/** 备份频率：每天固定时刻 或 每隔 N 小时 */
+export type ScheduleSpec =
+  | { mode: 'daily'; at: string } // "HH:mm"
+  | { mode: 'interval'; hours: number } // 1-168
+
 /** 备份档案（一个可备份单元） */
 export interface AppProfile {
   id: string
@@ -32,14 +37,20 @@ export interface AppProfile {
   encrypt: boolean
   /** 一致性等级声明 */
   consistency: ConsistencyLevel
-  /** 每日执行时刻（ HH:mm，错峰用），空=跟随默认批次 */
-  scheduleAt?: string
+  /** 备份频率（替代旧 scheduleAt；迁移兼容：旧数据转 {mode:'daily',at}） */
+  schedule: ScheduleSpec
+  /** 档案绑定的 WebDAV 目标 id 列表（空 = 全部启用目标） */
+  targetIds: string[]
+  /** 档案级保留份数（覆盖目标默认；per-target keep 语义保留） */
+  keep: number
+  /** 上次备份完成时刻（ISO），调度器用它 + schedule 推算下次 */
+  lastRunAt?: string
   enabled: boolean
   /** detector 出的草稿标记，确认后置 false */
   isDraft: boolean
 }
 
-/** WebDAV 目标 */
+/** WebDAV 目标（供应商无关；产品化：任意 WebDAV 服务器） */
 export interface BackupTarget {
   id: string
   name: string
@@ -48,13 +59,15 @@ export interface BackupTarget {
   /** secrets.env 引用键；不存明文 */
   passwordRef: string
   enabled: boolean
-  /** 自定义保留份数（覆盖全局） */
+  /** 目标默认保留份数（档案未设置 keep 时用） */
   keep: number
   /** 容量水位百分比（如 85 = 85% 配额触发裁剪） */
   capacityQuotaMb?: number
   capacityWarnPct: number
   /** 上传超时分钟 */
   timeoutMin: number
+  /** 是否接受未加密备份（产品化：可强制全仓库加密） */
+  allowUnencrypted: boolean
 }
 
 /** 一次备份执行记录 */

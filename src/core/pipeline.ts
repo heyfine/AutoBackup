@@ -73,7 +73,12 @@ export class Pipeline {
       })
 
       // 3. 串行推送多目标（单目标失败不阻塞其他）
-      const targets = store.listTargets(true)
+      // 档案绑定 targetIds（空=全部启用目标）；allowUnencrypted=false 的目标拒绝未加密 artifact
+      const allEnabled = store.listTargets(true)
+      const targets =
+        profile.targetIds.length > 0
+          ? allEnabled.filter((t) => profile.targetIds.includes(t.id))
+          : allEnabled
       const pushes: PushRecord[] = targets.map((t) => ({
         targetId: t.id,
         status: 'pending',
@@ -151,6 +156,11 @@ export class Pipeline {
         durationMs,
         error: allOk ? undefined : pushes.filter((p) => p.status === 'failed').map((p) => `${p.targetId}: ${p.error}`).join('; '),
       })
+      // 调度依赖：记录 lastRunAt（schedule 触发时更新）
+      if (trigger === 'schedule' && status === 'success') {
+        const cur = store.getProfile(profile.id)
+        if (cur) store.upsertProfile({ ...cur, lastRunAt: finishedAt })
+      }
 
       if (!allOk) {
         const failed = pushes.filter((p) => p.status === 'failed')
@@ -197,7 +207,7 @@ export class Pipeline {
       .filter((f) => !f.name.endsWith('.manifest.json')) // manifest 跟随主包，不独立计数
       .sort((a, b) => a.modifiedAt.localeCompare(b.modifiedAt)) // 旧 → 新
 
-    let keepN = target.keep
+    let keepN = profile.keep > 0 ? profile.keep : target.keep
     let deleted = 0
 
     // 容量水位兜底：超配额 → 迭代减 keep

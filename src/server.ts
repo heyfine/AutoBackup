@@ -2,7 +2,7 @@ import Fastify from 'fastify'
 import fastifyStatic from '@fastify/static'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { randomBytes, timingSafeEqual } from 'node:crypto'
+import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { readFileSync, writeFileSync, existsSync, renameSync } from 'node:fs'
 import type { Store } from './store/db.js'
 import type { Pipeline } from './core/pipeline.js'
@@ -150,6 +150,7 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
 
   app.get('/health', async () => ({ ok: true, version: '0.1.0' }))
   // ---- profiles（只读 + 手动触发；M3 不做档案编辑 UI）----
+  // ---- profiles（产品化：完整 CRUD）----
   app.get('/api/profiles', async () => {
     const profiles = store.listProfiles({ includeDrafts: true })
     const result = profiles.map((p: AppProfile) => {
@@ -157,6 +158,68 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
       return { ...p, passwordRef: p.passwordRef ? '***' : undefined, recentRuns: runs.map(pickRunPublic) }
     })
     return { profiles: result }
+  })
+
+  /** 新建/更新档案（产品化：完整字段编辑，含 schedule/targetIds/keep） */
+  app.post('/api/profiles', async (req, reply) => {
+    const body = (req.body ?? {}) as Partial<AppProfile> & { id?: string }
+    let profile: AppProfile
+    if (body.id) {
+      const existing = store.getProfile(body.id)
+      if (!existing) {
+        await reply.code(404).send({ error: 'profile not found' })
+        return
+      }
+      profile = {
+        ...existing,
+        ...body,
+        id: existing.id,
+      } as AppProfile
+    } else {
+      profile = {
+        id: body.id ?? `p_${Date.now().toString(36)}_${randomUUID().slice(0, 6)}`,
+        name: body.name ?? '未命名档案',
+        kind: body.kind ?? 'directory',
+        paths: body.paths ?? [],
+        containers: body.containers ?? [],
+        dbPath: body.dbPath,
+        database: body.database,
+        dbUser: body.dbUser,
+        dumpTool: body.dumpTool,
+        dumpArgs: body.dumpArgs,
+        passwordRef: body.passwordRef,
+        containerWorkdir: body.containerWorkdir,
+        encrypt: body.encrypt ?? false,
+        consistency: body.consistency ?? 'best_effort',
+        schedule: body.schedule ?? { mode: 'daily', at: '03:00' },
+        targetIds: body.targetIds ?? [],
+        keep: body.keep ?? 7,
+        enabled: body.enabled ?? true,
+        isDraft: false,
+      }
+    }
+    // 校验 schedule
+    const s = profile.schedule
+    if (s.mode === 'daily' && !/^\d{2}:\d{2}$/.test(s.at)) {
+      await reply.code(400).send({ error: 'daily 频率的 at 必须是 HH:mm' })
+      return
+    }
+    if (s.mode === 'interval' && (s.hours < 1 || s.hours > 168)) {
+      await reply.code(400).send({ error: 'interval 频率的 hours 必须在 1-168' })
+      return
+    }
+    if (profile.kind === 'directory' && profile.paths.length === 0) {
+      await reply.code(400).send({ error: '目录类档案至少要有一个路径' })
+      return
+    }
+    store.upsertProfile(profile)
+    return { profile }
+  })
+
+  app.delete('/api/profiles/:id', async (req) => {
+    const { id } = req.params as { id: string }
+    store.deleteProfile(id)
+    return { ok: true }
   })
 
   app.post('/api/profiles/:id/run', async (req, reply) => {
@@ -169,12 +232,112 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     }
   })
 
-  // ---- targets（凭据只回 has_password）----
+  // ---- targets（产品化：完整 CRUD，凭据只回 has_password）----
   app.get('/api/targets', async () => {
     const targets = store.listTargets(false)
     return { targets: targets.map((t: BackupTarget) => ({ ...t, passwordRef: '***' as const, hasPassword: secrets.has(t.passwordRef) })) }
   })
 
+  /** 新建/更新目标（无密码时保留旧凭据） */
+  app.post('/api/targets', async (req, reply) => {
+    const body = (req.body ?? {}) as Partial<BackupTarget> & { id?: string; password?: string; testOnly?: boolean }
+    const isNew = !body.id
+    let target: BackupTarget
+    if (isNew) {
+      const { id, passwordRef } = store.newTargetId(body.name ?? 'webdav')
+      target = {
+        id,
+        name: body.name ?? '未命名目标',
+        url: body.url ?? '',
+        username: body.username ?? '',
+        passwordRef,
+        enabled: body.enabled ?? true,
+        keep: body.keep ?? 7,
+        capacityQuotaMb: body.capacityQuotaMb,
+        capacityWarnPct: body.capacityWarnPct ?? 85,
+        timeoutMin: body.timeoutMin ?? 30,
+        allowUnencrypted: body.allowUnencrypted ?? true,
+      }
+      if (body.password) {
+        upsertSecret(passwordRef, body.password)
+        ;(secrets as unknown as { values: Map<string, string> }).values.set(passwordRef, body.password)
+      }
+      if (body.username) upsertSecret(`WEBDAV_${id.toUpperCase().replace(/-/g, '_')}_USER`, body.username)
+      store.upsertTarget(target)
+    } else {
+      const existing = store.getTarget(body.id as string)
+      if (!existing) {
+        await reply.code(404).send({ error: 'target not found' })
+        return
+      }
+      target = {
+        ...existing,
+        name: body.name ?? existing.name,
+        url: body.url ?? existing.url,
+        username: body.username ?? existing.username,
+        enabled: body.enabled ?? existing.enabled,
+        keep: body.keep ?? existing.keep,
+        capacityQuotaMb: body.capacityQuotaMb,
+        capacityWarnPct: body.capacityWarnPct ?? existing.capacityWarnPct,
+        timeoutMin: body.timeoutMin ?? existing.timeoutMin,
+        allowUnencrypted: body.allowUnencrypted ?? existing.allowUnencrypted,
+      }
+      if (body.password) {
+        upsertSecret(existing.passwordRef, body.password)
+        ;(secrets as unknown as { values: Map<string, string> }).values.set(existing.passwordRef, body.password)
+      }
+      if (body.username) upsertSecret(`WEBDAV_${existing.id.toUpperCase().replace(/-/g, '_')}_USER`, body.username)
+      store.upsertTarget(target)
+    }
+    const saved = store.getTarget(target.id)
+    return { target: saved ? { ...saved, passwordRef: '***', hasPassword: secrets.has(saved.passwordRef) } : null }
+  })
+
+  app.delete('/api/targets/:id', async (req) => {
+    const { id } = req.params as { id: string }
+    store.deleteTarget(id)
+    return { ok: true }
+  })
+
+  /** WebDAV 连接测试（用已存凭据或请求体里的临时凭据） */
+  app.post('/api/targets/test', async (req) => {
+    const body = (req.body ?? {}) as { url?: string; username?: string; password?: string; targetId?: string }
+    const { testConnection } = await import('./core/webdav.js')
+    let url = body.url
+    let username = body.username
+    let password = body.password
+    if (body.targetId && (!url || !password)) {
+      const t = store.getTarget(body.targetId)
+      if (t) {
+        url = url ?? t.url
+        username = username ?? t.username
+        password = password ?? secrets.getOptional(t.passwordRef)
+      }
+    }
+    if (!url) return { ok: false, message: '缺少 URL' }
+    const result = await testConnection({ url, username: username ?? '', password: password ?? '' })
+    return result
+  })
+
+  /** secrets.env 原子写单键 */
+  function upsertSecret(key: string, value: string): void {
+    const lines = readFileSync(secretsPath, 'utf8').split(/\r?\n/)
+    const updated: string[] = []
+    let wrote = false
+    for (const line of lines) {
+      if (line.split('=')[0]?.trim() === key) {
+        updated.push(`${key}=${value}`)
+        wrote = true
+      } else updated.push(line)
+    }
+    if (!wrote) updated.push(`${key}=${value}`)
+    const tmp = `${secretsPath}.tmp`
+    writeFileSync(tmp, updated.join('\n'), { mode: 0o600 })
+    renameSync(tmp, secretsPath)
+    ;(secrets as unknown as { values: Map<string, string> }).values.set(key, value)
+  }
+
+  // ---- targets 凭据快捷更新（兼容 M3 早期 UI）----
   app.post('/api/targets/:id/credentials', async (req, reply) => {
     const { id } = req.params as { id: string }
     const { username, password } = (req.body ?? {}) as { username?: string; password?: string }
@@ -183,30 +346,10 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
       await reply.code(404).send({ error: 'target not found' })
       return
     }
-    // 原子写 secrets.env（评审 D5）
-    const lines = readFileSync(secretsPath, 'utf8').split(/\r?\n/)
-    const userKey = `WEBDAV_${id.toUpperCase().replace(/-/g, '_')}_USER`
-    const passKey = target.passwordRef
-    const updated: string[] = []
-    let wroteUser = false
-    let wrotePass = false
-    for (const line of lines) {
-      const key = line.split('=')[0]?.trim()
-      if (key === userKey) { updated.push(`${userKey}=${username ?? ''}`); wroteUser = true }
-      else if (key === passKey) { updated.push(`${passKey}=${password ?? ''}`); wrotePass = true }
-      else updated.push(line)
-    }
-    if (!wroteUser && username) updated.push(`${userKey}=${username}`)
-    if (!wrotePass && password) updated.push(`${passKey}=${password}`)
-    const tmp = `${secretsPath}.tmp`
-    writeFileSync(tmp, updated.join('\n'), { mode: 0o600 })
-    renameSync(tmp, secretsPath)
-    // 内存 secrets 同步刷新
-    ;(secrets as unknown as { values: Map<string, string> }).values.set(userKey, username ?? '')
-    ;(secrets as unknown as { values: Map<string, string> }).values.set(passKey, password ?? '')
+    if (password) upsertSecret(target.passwordRef, password)
     if (username) {
-      const t = { ...target, username }
-      store.upsertTarget(t)
+      upsertSecret(`WEBDAV_${id.toUpperCase().replace(/-/g, '_')}_USER`, username)
+      store.upsertTarget({ ...target, username })
     }
     return { ok: true }
   })

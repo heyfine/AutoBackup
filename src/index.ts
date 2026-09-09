@@ -42,11 +42,7 @@ async function bootstrap(): Promise<{
   const secrets = new Secrets(secretsPath)
   const notifier = new BarkNotifier(secrets.getOptional('BARK_URL'))
   const pipeline = new Pipeline({ store, secrets, homeDir, notify: notifier, toolVersion: TOOL_VERSION })
-  const scheduler = new Scheduler(store, pipeline, () => {
-    const start = process.env.AUTOBACKUP_WINDOW_START ?? '180' // 03:00
-    const end = process.env.AUTOBACKUP_WINDOW_END ?? '300' // 05:00
-    return { startMin: Number(start), endMin: Number(end) }
-  })
+  const scheduler = new Scheduler(store, pipeline)
   return { store, secrets, pipeline, scheduler, homeDir, secretsPath }
 }
 
