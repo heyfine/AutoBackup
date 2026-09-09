@@ -357,6 +357,19 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     return { ok: true }
   })
 
+  /** 目标启停开关（卡片 toggle） */
+  app.post('/api/targets/:id/toggle', async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const existing = store.getTarget(id)
+    if (!existing) {
+      await reply.code(404).send({ error: 'target not found' })
+      return
+    }
+    const updated = { ...existing, enabled: !existing.enabled }
+    store.upsertTarget(updated)
+    return { target: { ...updated, passwordRef: '***', hasPassword: secrets.has(updated.passwordRef) } }
+  })
+
   /** WebDAV 连接测试（用已存凭据或请求体里的临时凭据） */
   app.post('/api/targets/test', async (req) => {
     const body = (req.body ?? {}) as { url?: string; username?: string; password?: string; targetId?: string }

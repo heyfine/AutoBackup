@@ -531,6 +531,16 @@ function Targets() {
     load()
   }, [])
 
+  /** iOS 风格启停开关（乐观更新，失败回滚） */
+  const toggle = async (t: Target) => {
+    setTargets((s) => s.map((x) => (x.id === t.id ? { ...x, enabled: !x.enabled } : x)))
+    try {
+      await api(`/api/targets/${t.id}/toggle`, { method: 'POST' })
+    } catch {
+      await load()
+    }
+  }
+
   const save = async () => {
     if (!editing) return
     setMsg('')
@@ -601,8 +611,13 @@ function Targets() {
           <label>上传超时（分钟） <input type="number" min={5} max={240} value={t.timeoutMin ?? 30} onInput={(e) => upd({ timeoutMin: Number((e.target as HTMLInputElement).value) })} /></label>
         </div>
         <label class="check-item">
-          <input type="checkbox" checked={t.allowUnencrypted ?? true} onChange={(e) => upd({ allowUnencrypted: (e.target as HTMLInputElement).checked })} /> 允许未加密备份（关闭则只收加密包，强烈建议敏感服务器关闭）
+          <Toggle checked={t.allowUnencrypted ?? true} onChange={(v) => upd({ allowUnencrypted: v })} /> 允许未加密备份（关闭则只收加密包，强烈建议敏感服务器关闭）
         </label>
+        {t.id && (
+          <label class="check-item">
+            <Toggle checked={t.enabled ?? true} onChange={(v) => upd({ enabled: v })} /> 启用此目标（关闭后档案推送会跳过它）
+          </label>
+        )}
         {testResult[t.id ?? 'form'] && <div class="banner-ok">{testResult[t.id ?? 'form']}</div>}
         <div class="btn-row">
           <button class="ghost" disabled={testing === 'form'} onClick={() => test(t)}>测试连接</button>
@@ -620,12 +635,14 @@ function Targets() {
         <button onClick={() => setEditing({ enabled: true, keep: 7, timeoutMin: 30, allowUnencrypted: true })}>＋ 添加 WebDAV 目标</button>
       </div>
       {targets.map((t) => (
-        <div class="card wide" key={t.id}>
+        <div class={`card wide ${t.enabled ? '' : 'card-off'}`} key={t.id}>
           <div class="card-head">
             <span class="name">{t.name}</span>
             <span class={`badge ${t.hasPassword ? 'ok' : 'warn'}`}>{t.hasPassword ? '✓ 凭据已配置' : '⚠ 未配置凭据'}</span>
-            {!t.enabled && <span class="badge warn">禁用</span>}
             {!t.allowUnencrypted && <span class="badge">仅加密</span>}
+            <span style="margin-left:auto">
+              <Toggle checked={t.enabled} onChange={() => toggle(t)} />
+            </span>
           </div>
           <div class="card-meta">{t.url} · 保留 {t.keep} 份{t.capacityQuotaMb ? ` · 配额 ${(t.capacityQuotaMb / 1024).toFixed(0)}GB` : ''} · 超时 {t.timeoutMin}min</div>
           {testResult[t.id] && <div class="banner-ok">{testResult[t.id]}</div>}
