@@ -51,7 +51,10 @@ interface Target {
 
 // ---- API helpers ----
 async function api<T>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts })
+  const headers: Record<string, string> = { ...(opts?.headers as Record<string, string>) }
+  // 只在有 body 时声明 JSON（无 body 的 POST 会被 Fastify 400 拒绝）
+  if (opts?.body) headers['Content-Type'] = 'application/json'
+  const res = await fetch(path, { ...opts, headers })
   if (res.status === 401 && !path.startsWith('/auth/')) {
     window.location.hash = '#/login'
     throw new Error('unauthorized')
