@@ -240,43 +240,32 @@ function Profiles() {
   const [editing, setEditing] = useState<Profile | null>(null)
   const [isNew, setIsNew] = useState(false)
   const [msg, setMsg] = useState('')
-  const [drafts, setDrafts] = useState<import('./types').DetectedDraft[]>([])
+  const [drafts, setDrafts] = useState<DetectedDraft[]>([])
   const [scanning, setScanning] = useState(false)
   const [scanInfo, setScanInfo] = useState('')
   const [restoring, setRestoring] = useState<Profile | null>(null)
 
-  // 组卡片通过事件请求打开还原弹窗
-  useEffect(() => {
-    const onRestoreEvt = (e: Event) => {
-      const pid = (e as CustomEvent<string>).detail
-      const target = profilesRef.current.find((x) => x.id === pid)
-      if (target) setRestoring(target)
-    }
-    window.addEventListener('ab-restore', onRestoreEvt)
-    return () => window.removeEventListener('ab-restore', onRestoreEvt)
-  }, [])
-
-  const profilesRef = useRef<Profile[]>([])
-  profilesRef.current = profiles
-
   const load = async () => {
-    const [pr, tg] = await Promise.all([
-      api<{ profiles: Profile[] }>('/api/profiles'),
-      api<{ targets: Target[] }>('/api/targets'),
-    ])
-    setProfiles(pr.profiles)
-    setTargets(tg.targets)
+    try {
+      const [pr, tg] = await Promise.all([
+        api<{ profiles: Profile[] }>('/api/profiles'),
+        api<{ targets: Target[] }>('/api/targets'),
+      ])
+      setProfiles(pr.profiles)
+      setTargets(tg.targets)
+    } catch (ex) {
+      setMsg(`加载失败：${ex instanceof Error ? ex.message : String(ex)}`)
+    }
   }
   useEffect(() => {
     load()
   }, [])
 
-  /** 扫描新应用（docker 检测） */
   const scan = async () => {
     setScanning(true)
     setScanInfo('')
     try {
-      const r = await api<{ drafts: import('./types').DetectedDraft[]; scanned: number; error?: string }>('/api/detect', { method: 'POST' })
+      const r = await api<{ drafts: DetectedDraft[]; scanned: number; error?: string }>('/api/detect', { method: 'POST' })
       if (r.error) {
         setScanInfo(`⚠️ ${r.error}`)
         setDrafts([])
@@ -291,8 +280,7 @@ function Profiles() {
     }
   }
 
-  /** 采纳草稿：建档案（默认停用），跳到编辑器让用户确认细节 */
-  const adopt = async (d: import('./types').DetectedDraft) => {
+  const adopt = async (d: DetectedDraft) => {
     try {
       const r = await api<{ profile: Profile }>('/api/profiles/adopt', {
         method: 'POST',
@@ -301,7 +289,6 @@ function Profiles() {
       setDrafts((s) => s.filter((x) => x.containerName !== d.containerName))
       setMsg(`✅ 已添加「${r.profile.name}」（默认停用，请编辑确认后打开开关）`)
       await load()
-      // 直接进入编辑器
       setIsNew(true)
       setEditing({ ...r.profile, recentRuns: [] })
     } catch (ex) {
@@ -309,14 +296,12 @@ function Profiles() {
     }
   }
 
-  /** iOS 风格启停开关 */
   const toggle = async (p: Profile) => {
-    // 乐观更新
     setProfiles((s) => s.map((x) => (x.id === p.id ? { ...x, enabled: !x.enabled } : x)))
     try {
       await api(`/api/profiles/${p.id}/toggle`, { method: 'POST' })
     } catch {
-      await load() // 失败回滚
+      await load()
     }
   }
 
@@ -332,7 +317,7 @@ function Profiles() {
             paths: [],
             containers: [],
             encrypt: false,
-            enabled: false, // 新建默认停用（用户确认后自己开）
+            enabled: false,
             isDraft: false,
             schedule: { mode: 'daily', at: '03:00' },
             targetIds: [],
@@ -347,7 +332,7 @@ function Profiles() {
     setMsg('')
     try {
       const body: Record<string, unknown> = { ...editing }
-      if (isNew) delete (body as { recentRuns?: unknown }).recentRuns
+      if (isNew) delete body.recentRuns
       await api('/api/profiles', { method: 'POST', body: JSON.stringify(body) })
       setMsg('✅ 已保存')
       setEditing(null)
@@ -489,24 +474,50 @@ function Profiles() {
         </div>
       )}
 
-      {/** 按应用分组展示：同一应用的数据+配置档案聚合到一张卡片，Tab 切换（用户需求） */}
-      {groupProfiles(profiles).map((group) => (
-        <AppGroupCard
-          key={group.key}
-          group={group}
-          running={running}
-          onRun={runNow}
-          onToggle={toggle}
-          onStartEdit={startEdit}
-          onRemove={remove}
-        />
-      ))}
+      <div class="cards">
+        {profiles.map((p) => {
+          const last = p.recentRuns[0]
+          const cls = last?.status === 'success' ? 'ok' : last?.status === 'failed' ? 'bad' : 'idle'
+          return (
+            <div class={`card ${p.enabled ? '' : 'card-off'}`} key={p.id}>
+              <div class="card-head">
+                <span class="name">{p.name}</span>
+                {p.encrypt && <span class="badge">🔒</span>}
+                <span style="margin-left:auto">
+                  <Toggle checked={p.enabled} onChange={() => toggle(p)} />
+                </span>
+              </div>
+              <div class="card-meta">{p.kind} · {scheduleLabel(p.schedule)} · 保留 {p.keep} 份 · 目标 {p.targetIds.length === 0 ? '全部' : p.targetIds.length}</div>
+              <div class="card-last">
+                {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)} · {fmtSize(last.sizeBytes)}</> : <span class="muted">从未备份</span>}
+              </div>
+              {last?.error && <div class="card-err">{last.error}</div>}
+              <div class="btn-row">
+                <button class="ghost sm" disabled={scanning && false} onClick={() => runNowLocal(p.id)}>{'立即备份'}</button>
+                <button class="ghost sm" onClick={() => startEdit(p)}>编辑</button>
+                <button class="ghost sm" onClick={() => setRestoring(p)}>还原/下载</button>
+                <button class="ghost sm danger" onClick={() => remove(p.id)}>删除</button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
       {restoring && <RestoreDialog profile={restoring} onClose={() => { setRestoring(null); load() }} />}
     </div>
   )
+
+  function runNowLocal(id: string) {
+    void (async () => {
+      try {
+        await api(`/api/profiles/${id}/run`, { method: 'POST' })
+        await load()
+      } catch (ex) {
+        setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
+      }
+    })()
+  }
 }
 
-/** 应用名推断：去掉「数据/配置/文件/数据库」等后缀后的基础名 */
 function appBaseName(name: string): string {
   return name.replace(/(数据|配置|文件|数据库|网关数据|静态站|自身)$/g, '').trim() || name
 }
@@ -541,7 +552,10 @@ function AppGroupCard(props: {
   onStartEdit: (p: Profile) => void
   onRemove: (id: string) => void
 }) {
+  try {
   const { group, running, onRun, onToggle, onStartEdit, onRemove } = props
+  window.__gLog = (window.__gLog || [])
+  window.__gLog.push({ app: group.appName, items: group.items.length, first: group.items[0]?.name })
   const [activeId, setActiveId] = useState(group.items[0]?.id ?? '')
   const active = group.items.find((x) => x.id === activeId) ?? group.items[0]
   if (!active) return null
@@ -581,6 +595,10 @@ function AppGroupCard(props: {
       </div>
     </div>
   )
+  } catch (e) {
+    ;(window.__errs = window.__errs || []).push('GROUP: ' + (e instanceof Error ? e.stack?.slice(0, 300) : String(e)))
+    return <div class="card">⚠️ 组卡片渲染失败：{String(e)}</div>
+  }
 }
 
 // 组卡片内触发还原弹窗：通过自定义事件向上传递（保持组件无状态依赖）

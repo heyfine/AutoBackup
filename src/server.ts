@@ -593,7 +593,12 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
   // 静态 UI（M3 构建产物）
   const webDist = join(__dirname, '../../web/dist')
   if (existsSync(webDist)) {
-    await app.register(fastifyStatic, { root: webDist })
+    await app.register(fastifyStatic, {
+      root: webDist,
+      setHeaders: (res) => {
+        ;(res as unknown as { setHeader: (k: string, v: string) => void }).setHeader('Cache-Control', 'no-cache')
+      },
+    })
     app.setNotFoundHandler(async (req, reply) => {
       const path = req.url.split('?')[0] ?? ''
       if (path.startsWith('/api/') || path.startsWith('/auth/')) {
