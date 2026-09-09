@@ -12,3 +12,9 @@ preview/
 
 # 内部文档不进 git（按团队约定）
 docs/
+
+.webdav-test/
+autobackup.db*
+test-dir_*.tar.gz
+test-dir_*.manifest.json
+*.tar.gz.age
