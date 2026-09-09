@@ -245,6 +245,20 @@ function Profiles() {
   const [scanInfo, setScanInfo] = useState('')
   const [restoring, setRestoring] = useState<Profile | null>(null)
 
+  // 组卡片通过事件请求打开还原弹窗
+  useEffect(() => {
+    const onRestoreEvt = (e: Event) => {
+      const pid = (e as CustomEvent<string>).detail
+      const target = profilesRef.current.find((x) => x.id === pid)
+      if (target) setRestoring(target)
+    }
+    window.addEventListener('ab-restore', onRestoreEvt)
+    return () => window.removeEventListener('ab-restore', onRestoreEvt)
+  }, [])
+
+  const profilesRef = useRef<Profile[]>([])
+  profilesRef.current = profiles
+
   const load = async () => {
     const [pr, tg] = await Promise.all([
       api<{ profiles: Profile[] }>('/api/profiles'),
@@ -475,36 +489,103 @@ function Profiles() {
         </div>
       )}
 
-      <div class="cards">
-        {profiles.map((p) => {
-          const last = p.recentRuns[0]
-          const cls = last?.status === 'success' ? 'ok' : last?.status === 'failed' ? 'bad' : 'idle'
-          return (
-            <div class={`card ${p.enabled ? '' : 'card-off'}`} key={p.id}>
-              <div class="card-head">
-                <span class="name">{p.name}</span>
-                {p.encrypt && <span class="badge">🔒</span>}
-                <span style="margin-left:auto">
-                  <Toggle checked={p.enabled} onChange={() => toggle(p)} />
-                </span>
-              </div>
-              <div class="card-meta">{p.kind} · {scheduleLabel(p.schedule)} · 保留 {p.keep} 份 · 目标 {p.targetIds.length === 0 ? '全部' : p.targetIds.length}</div>
-              <div class="card-last">
-                {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)} · {fmtSize(last.sizeBytes)}</> : <span class="muted">从未备份</span>}
-              </div>
-              {last?.error && <div class="card-err">{last.error}</div>}
-              <div class="btn-row">
-                <button class="ghost sm" onClick={() => startEdit(p)}>编辑</button>
-                <button class="ghost sm" onClick={() => setRestoring(p)}>还原</button>
-                <button class="ghost sm danger" onClick={() => remove(p.id)}>删除</button>
-              </div>
-            </div>
-          )
-        })}
-      </div>
+      {/** 按应用分组展示：同一应用的数据+配置档案聚合到一张卡片，Tab 切换（用户需求） */}
+      {groupProfiles(profiles).map((group) => (
+        <AppGroupCard
+          key={group.key}
+          group={group}
+          running={running}
+          onRun={runNow}
+          onToggle={toggle}
+          onStartEdit={startEdit}
+          onRemove={remove}
+        />
+      ))}
       {restoring && <RestoreDialog profile={restoring} onClose={() => { setRestoring(null); load() }} />}
     </div>
   )
+}
+
+/** 应用名推断：去掉「数据/配置/文件/数据库」等后缀后的基础名 */
+function appBaseName(name: string): string {
+  return name.replace(/(数据|配置|文件|数据库|网关数据|静态站|自身)$/g, '').trim() || name
+}
+
+interface ProfileGroup {
+  key: string
+  appName: string
+  items: Profile[]
+}
+
+/** 把档案按「同一应用」分组（基础名相同即同组）；单档案组也统一走组卡片渲染 */
+function groupProfiles(profiles: Profile[]): ProfileGroup[] {
+  const map = new Map<string, Profile[]>()
+  for (const p of profiles) {
+    const base = appBaseName(p.name)
+    if (!map.has(base)) map.set(base, [])
+    map.get(base)?.push(p)
+  }
+  return [...map.entries()].map(([appName, items]) => ({
+    key: items[0]?.id ?? appName,
+    appName,
+    items,
+  }))
+}
+
+/** 应用组卡片：单档案直接展开；多档案 Tab 切换 */
+function AppGroupCard(props: {
+  group: ProfileGroup
+  running: string | null
+  onRun: (id: string) => void
+  onToggle: (p: Profile) => void
+  onStartEdit: (p: Profile) => void
+  onRemove: (id: string) => void
+}) {
+  const { group, running, onRun, onToggle, onStartEdit, onRemove } = props
+  const [activeId, setActiveId] = useState(group.items[0]?.id ?? '')
+  const active = group.items.find((x) => x.id === activeId) ?? group.items[0]
+  if (!active) return null
+  const last = active.recentRuns[0]
+  const cls = last?.status === 'success' ? 'ok' : last?.status === 'failed' ? 'bad' : 'idle'
+
+  return (
+    <div class={`card group-card ${active.enabled ? '' : 'card-off'}`}>
+      <div class="card-head">
+        <span class="name">{group.appName}</span>
+        {active.encrypt && <span class="badge">🔒</span>}
+        <span style="margin-left:auto">
+          <Toggle checked={active.enabled} onChange={() => onToggle(active)} />
+        </span>
+      </div>
+      {group.items.length > 1 && (
+        <div class="tab-row">
+          {group.items.map((item) => (
+            <button key={item.id} class={`tab ${item.id === active.id ? 'on' : ''}`} onClick={() => setActiveId(item.id)}>
+              {item.name.slice(group.appName.length).replace(/^[^\u4e00-\u9fa5a-zA-Z0-9]+/, '') || item.kind}
+            </button>
+          ))}
+        </div>
+      )}
+      <div class="card-meta">
+        {active.kind} · {scheduleLabel(active.schedule)} · 保留 {active.keep} 份 · 目标 {active.targetIds.length === 0 ? '全部' : active.targetIds.length}
+      </div>
+      <div class="card-last">
+        {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)} · {fmtSize(last.sizeBytes)}</> : <span class="muted">从未备份</span>}
+      </div>
+      {last?.error && <div class="card-err">{last.error}</div>}
+      <div class="btn-row">
+        <button class="ghost sm" disabled={running === active.id} onClick={() => onRun(active.id)}>{running === active.id ? '备份中…' : '立即备份'}</button>
+        <button class="ghost sm" onClick={() => onStartEdit(active)}>编辑</button>
+        <button class="ghost sm" onClick={() => setRestoringViaEvent(active)}>还原/下载</button>
+        <button class="ghost sm danger" onClick={() => onRemove(active.id)}>删除</button>
+      </div>
+    </div>
+  )
+}
+
+// 组卡片内触发还原弹窗：通过自定义事件向上传递（保持组件无状态依赖）
+function setRestoringViaEvent(p: Profile): void {
+  window.dispatchEvent(new CustomEvent('ab-restore', { detail: p.id }))
 }
 
 /** iOS 风格滑动开关 */
