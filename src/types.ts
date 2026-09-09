@@ -22,6 +22,8 @@ export interface AppProfile {
   dumpArgs?: string
   /** mariadb：库名；pg：库名 */
   database?: string
+  /** pg：连接用户（容器内 OS 用户≠DB 用户时必填，如 litellm 的 llmproxy） */
+  dbUser?: string
   /** mariadb：凭据在 secrets.env 的引用键 */
   passwordRef?: string
   /** 容器内工作路径（dump 临时文件） */

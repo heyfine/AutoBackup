@@ -1,0 +1,42 @@
+[Unit]
+Description=AutoBackup - VPS backup center (scheduler + API)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/auto-backup
+ExecStart=/usr/bin/node /opt/auto-backup/dist/src/index.js serve
+Restart=on-failure
+RestartSec=30
+StartLimitInterval=600
+StartLimitBurst=5
+
+# 资源控制（1C 机器，评审 devops 方案）
+Nice=19
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+OOMScoreAdjust=500
+MemoryMax=512M
+CPUQuota=50%
+
+# 安全加固（root 运行，最小化可写路径）
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=tmpfs
+BindPaths=/root/myapi
+ReadOnlyPaths=/etc/nginx
+ReadWritePaths=/opt/auto-backup
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+
+# 环境变量
+Environment=NODE_ENV=production
+Environment=AUTOBACKUP_HOME=/opt/auto-backup
+Environment=AUTOBACKUP_WINDOW_START=180
+Environment=AUTOBACKUP_WINDOW_END=300
+
+[Install]
+WantedBy=multi-user.target

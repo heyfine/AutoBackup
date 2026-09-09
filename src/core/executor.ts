@@ -138,15 +138,17 @@ async function snapshotMariadb(profile: AppProfile, secrets: (ref: string) => st
   }
 }
 
-/** Postgres：docker exec pg_dump -Fc（MVCC 在线一致性） */
+/** Postgres：docker exec pg_dump -Fc（MVCC 在线一致性）；用户名取 profile.dbUser 或容器 env 推断 */
 async function snapshotPostgres(profile: AppProfile, stagingDir: string): Promise<SnapshotResult> {
   const container = profile.containers[0]
   if (!container) throw new ExecutorError('postgres profile missing container', profile.id)
   const db = profile.database ?? 'postgres'
+  // pg_dump 默认用 OS 用户名（root 不存在于容器内），显式 -U
+  const user = profile.dbUser ?? 'postgres'
   const dumpFile = `dump-${Date.now()}.dump`
   const inContainer = `/tmp/${dumpFile}`
   try {
-    await execFileAsync('docker', ['exec', container, 'pg_dump', '-Fc', '-d', db, '-f', inContainer])
+    await execFileAsync('docker', ['exec', container, 'pg_dump', '-U', user, '-Fc', '-d', db, '-f', inContainer])
     const { stdout } = await execFileAsync('docker', ['exec', container, 'cat', inContainer], {
       maxBuffer: 512 * 1024 * 1024,
       encoding: 'buffer',
