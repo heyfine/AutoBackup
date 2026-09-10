@@ -26,15 +26,22 @@ export interface InspectResult {
   note: string
 }
 
-/** 目录大小（字节）——快速统计（跳过无权限项） */
-async function dirSize(p: string): Promise<number> {
+/** 目录大小（字节）——快速估算：限文件数/深度，避免大目录拖慢编辑器打开 */
+const SIZE_SCAN_MAX_FILES = 2000
+let sizeScanBudget = SIZE_SCAN_MAX_FILES
+async function dirSize(p: string, depth = 0): Promise<number> {
+  if (sizeScanBudget <= 0 || depth > 6) return 0
   let total = 0
   try {
     const s = await stat(p)
-    if (!s.isDirectory()) return s.size
+    if (!s.isDirectory()) {
+      sizeScanBudget--
+      return s.size
+    }
     const entries = await readdir(p, { withFileTypes: true })
     for (const e of entries) {
-      total += await dirSize(join(p, e.name)).catch(() => 0)
+      if (sizeScanBudget <= 0) break
+      total += await dirSize(join(p, e.name), depth + 1).catch(() => 0)
     }
   } catch {
     return 0
@@ -43,6 +50,7 @@ async function dirSize(p: string): Promise<number> {
 }
 
 async function pathSize(p: string): Promise<number> {
+  sizeScanBudget = SIZE_SCAN_MAX_FILES
   try {
     const s = await stat(p)
     return s.isDirectory() ? await dirSize(p) : s.size
@@ -179,6 +187,7 @@ async function containerMounts(container: string): Promise<string[]> {
 }
 
 async function dirSizeOfMounts(mounts: string[]): Promise<number> {
+  sizeScanBudget = SIZE_SCAN_MAX_FILES
   let total = 0
   for (const m of mounts) {
     total += await dirSize(m).catch(() => 0)

@@ -357,16 +357,17 @@ function Profiles() {
   const [inspecting, setInspecting] = useState(false)
   const [inspectNote, setInspectNote] = useState('')
 
-  const inspectParts = async () => {
-    if (!editing) return
+  const inspectParts = async (prof?: Profile | null) => {
+    const e = prof ?? editing
+    if (!e) return
     setInspecting(true)
     setInspectNote('')
     try {
       // 识别线索 = 档案字段 + 已勾选 parts 的路径/容器（parts 里的线索最准）
-      const parts = editing.parts ?? []
-      const allPaths = [...(editing.paths ?? []), ...parts.flatMap((x) => x.paths ?? [])]
-      const allContainers = [...(editing.containers ?? []), ...parts.map((x) => x.container).filter(Boolean)] as string[]
-      const dbPaths = [editing.dbPath, ...parts.map((x) => x.dbPath).filter(Boolean)] as (string | undefined)[]
+      const parts = e.parts ?? []
+      const allPaths = [...(e.paths ?? []), ...parts.flatMap((x) => x.paths ?? [])]
+      const allContainers = [...(e.containers ?? []), ...parts.map((x) => x.container).filter(Boolean)] as string[]
+      const dbPaths = [e.dbPath, ...parts.map((x) => x.dbPath).filter(Boolean)] as (string | undefined)[]
       const r = await api<{ parts: DetectedPart[]; note: string }>('/api/profiles/inspect', {
         method: 'POST',
         body: JSON.stringify({
@@ -374,15 +375,15 @@ function Profiles() {
           dbPath: dbPaths.find(Boolean),
           dbPaths: dbPaths.filter(Boolean),
           paths: [...new Set(allPaths)],
-          name: editing.name,
+          name: e.name,
         }),
       })
       setDetectedParts(r.parts ?? [])
       setInspectNote(r.note ?? '')
       // 若档案还没有勾选，自动全选可用项（体验：识别即可用，可手动取消）
-      if ((editing.parts ?? []).length === 0) {
+      if ((e.parts ?? []).length === 0) {
         const auto = (r.parts ?? []).filter((x) => x.available).map(({ source, available, unavailable, ...part }) => part)
-        if (auto.length > 0) upd({ parts: auto })
+        if (auto.length > 0) setEditing((cur) => (cur ? { ...cur, parts: auto } : cur))
       }
     } catch (ex) {
       setInspectNote(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
@@ -405,10 +406,9 @@ function Profiles() {
 
   const startEdit = (p: Profile | null) => {
     setIsNew(!p)
-    setEditing(
-      p
-        ? { ...p }
-        : {
+    const prof: Profile = p
+      ? { ...p }
+      : {
             id: '',
             name: '',
             kind: 'directory',
@@ -421,8 +421,12 @@ function Profiles() {
             targetIds: [],
             keep: 7,
             recentRuns: [],
-          },
-    )
+          }
+    setEditing(prof)
+    setDetectedParts([])
+    setInspectNote('')
+    // 打开编辑器即自动识别可备份类型（体验：列表直接可见，无需手动点击）
+    void inspectParts(prof)
   }
 
   const save = async () => {
