@@ -103,6 +103,17 @@ function partIdent(x: ProfilePart): string {
   return `${x.kind}|${x.dbPath ?? ''}|${x.database ?? ''}|${x.container ?? ''}|${(x.paths ?? []).join(',')}`
 }
 
+/** 勾选匹配：ident 相等，或目录/配置类 paths 有交集（多路径 part 与单路径候选视为同一项） */
+function partMatches(selected: ProfilePart, cand: ProfilePart): boolean {
+  if (partIdent(selected) === partIdent(cand)) return true
+  const selPaths = selected.paths ?? []
+  const candPaths = cand.paths ?? []
+  if (selPaths.length > 0 && candPaths.length > 0) {
+    return selPaths.some((s) => candPaths.includes(s))
+  }
+  return false
+}
+
 function kindLabel(k: string): string {
   switch (k) {
     case 'sqlite': return 'SQLite'
@@ -378,7 +389,11 @@ function Profiles() {
           name: e.name,
         }),
       })
-      setDetectedParts(r.parts ?? [])
+      // 已选 parts 中未被识别候选覆盖的项（如手动填的多路径配置）也显示为可勾选行
+      const detected = r.parts ?? []
+      const extra = (e.parts ?? []).filter((x) => !detected.some((d) => partMatches(x, d)))
+        .map((x) => ({ ...x, source: (x.paths ?? [x.dbPath ?? x.container ?? '']).join(', '), available: true }) as DetectedPart)
+      setDetectedParts([...detected, ...extra])
       setInspectNote(r.note ?? '')
       // 若档案还没有勾选，自动全选可用项（体验：识别即可用，可手动取消）
       if ((e.parts ?? []).length === 0) {
@@ -474,7 +489,7 @@ function Profiles() {
           {detectedParts.length > 0 && (
             <div class="parts-list">
               {detectedParts.map((dp, i) => {
-                const checked = (p.parts ?? []).some((x) => partIdent(x) === partIdent(dp))
+                const checked = (p.parts ?? []).some((x) => partMatches(x, dp))
                 return (
                   <label class="part-item" key={i}>
                     <input
@@ -487,7 +502,7 @@ function Profiles() {
                           const { source, available, unavailable, ...part } = dp
                           upd({ parts: [...cur, part] })
                         } else {
-                          upd({ parts: cur.filter((x) => partIdent(x) !== partIdent(dp)) })
+                          upd({ parts: cur.filter((x) => !partMatches(x, dp)) })
                         }
                       }}
                     />
@@ -503,8 +518,14 @@ function Profiles() {
           )}
           {(p.parts ?? []).length > 0 && (
             <div class="parts-summary">
-              已选 {(p.parts ?? []).length} 项
-              {(p.parts ?? []).length >= 2 && '：备份时合并为一个压缩包，还原时整体自动恢复（数据库自动停/起容器）'}
+              <strong>已选 {(p.parts ?? []).length} 项：</strong>
+              {(p.parts ?? []).map((x, i) => (
+                <span class="sel-part" key={i} title={partIdent(x)}>
+                  {x.label || kindLabel(x.kind)}{x.sizeBytes != null ? `(${fmtSize(x.sizeBytes)})` : ''}
+                  {(x.paths ?? []).length > 1 ? ` 等${x.paths!.length}项` : ''}
+                </span>
+              ))}
+              {(p.parts ?? []).length >= 2 && '——备份时合并为一个压缩包，还原时整体自动恢复（数据库自动停/起容器）'}
               <button class="ghost sm" type="button" onClick={() => upd({ parts: [] })}>清空</button>
             </div>
           )}

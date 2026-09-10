@@ -241,3 +241,13 @@ input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   margin-top: 8px; font-size: 12px; color: var(--muted-fg, #666);
   display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
 }
+
+.sel-part {
+  display: inline-block;
+  padding: 2px 8px;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 6px;
+  background: var(--card, #f8f8f8);
+  font-size: 12px;
+  margin: 0 2px;
+}
