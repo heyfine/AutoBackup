@@ -10,7 +10,7 @@
 // read-tree/update-index/commit-tree），不切换分支、不改工作区 —— 避免分支
 // 切换把「仅在快照分支中被跟踪」的内部文档从工作区删掉的事故。
 
-import { readFileSync, rmSync } from 'node:fs';
+import { readFileSync, rmSync, statSync, globSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 
 const PRIVATE_REMOTE = 'private';
@@ -30,16 +30,17 @@ function readInternalDocs() {
   const docs = lines
     .slice(start + 1)
     .filter((line) => line.trim() !== '' && !line.trim().startsWith('#'));
-  const missing = docs.filter((doc) => !existsSync(doc));
+  const missing = docs.filter((doc) => !pathExists(doc) && globSync(doc, { exclude: () => false }).length === 0);
   if (missing.length > 0) {
     throw new Error(`内部文档缺失（.gitignore 有清单但工作区没有）：${missing.join(', ')}`);
   }
   return docs;
 }
 
-function existsSync(path) {
+/** 存在性检查：文件或目录均算存在。 */
+function pathExists(path) {
   try {
-    readFileSync(path);
+    statSync(path);
     return true;
   } catch {
     return false;
