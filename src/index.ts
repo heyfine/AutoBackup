@@ -107,6 +107,8 @@ async function main(): Promise<void> {
     case 'serve': {
       await ctx.pipeline.recoverStaleRuns()
       ctx.scheduler.start()
+      const { startTempCleanupTimer } = await import('./core/temp-cleanup.js')
+      const stopCleanup = startTempCleanupTimer(ctx.homeDir)
       const { startApi } = await import('./server.js')
       const api = await startApi({
         store: ctx.store,
@@ -119,6 +121,7 @@ async function main(): Promise<void> {
       const shutdown = (): void => {
         console.log('\nshutting down...')
         ctx.scheduler.stop()
+        stopCleanup()
         void api.stop()
         ctx.store.close()
         process.exit(0)
