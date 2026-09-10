@@ -1,17 +1,14 @@
 import { render } from 'preact'
-import { useState, useEffect, useRef } from 'preact/hooks'
+import { useState, useEffect } from 'preact/hooks'
 import './style.css'
 
-// ---- types（与后端对齐） ----
+// ---- types ----
 interface RunPublic {
   id: string
   profileId: string
   trigger: string
   status: string
-  stage: string
   startedAt: string
-  finishedAt?: string
-  durationMs?: number
   sizeBytes?: number
   encrypted: boolean
   pushes: { targetId: string; status: string; attempts: number; error?: string }[]
@@ -33,7 +30,6 @@ interface Profile {
   schedule: ScheduleSpec
   targetIds: string[]
   keep: number
-  lastRunAt?: string
   recentRuns: RunPublic[]
 }
 interface Target {
@@ -48,11 +44,17 @@ interface Target {
   timeoutMin: number
   allowUnencrypted: boolean
 }
+interface DetectedDraft {
+  containerName: string
+  image: string
+  mounts: { type: string; source: string; dest: string }[]
+  suggestedProfile: Partial<Profile> & { name?: string }
+  confidence: string
+}
 
-// ---- API helpers ----
+// ---- API ----
 async function api<T>(path: string, opts?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { ...(opts?.headers as Record<string, string>) }
-  // 只在有 body 时声明 JSON（无 body 的 POST 会被 Fastify 400 拒绝）
   if (opts?.body) headers['Content-Type'] = 'application/json'
   const res = await fetch(path, { ...opts, headers })
   if (res.status === 401 && !path.startsWith('/auth/')) {
@@ -73,16 +75,28 @@ function fmtSize(n?: number): string {
 function fmtTime(iso?: string): string {
   if (!iso) return '—'
   const d = new Date(iso)
-  const diff = Date.now() - d.getTime()
-  const mins = Math.floor(diff / 60000)
+  const mins = Math.floor((Date.now() - d.getTime()) / 60000)
   if (mins < 1) return '刚刚'
   if (mins < 60) return `${mins} 分钟前`
   if (mins < 24 * 60) return `${Math.floor(mins / 60)} 小时前`
   return d.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 function scheduleLabel(s: ScheduleSpec): string {
+  if (!s) return '—'
   if (s.mode === 'daily') return `每天 ${s.at}`
   return `每 ${s.hours} 小时`
+}
+function appBaseName(name: string): string {
+  return name.replace(/(数据|配置|文件|数据库|网关数据|静态站|自身)$/g, '').trim() || name
+}
+
+// ---- Toggle (iOS 风格) ----
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <span class={`ios-toggle ${checked ? 'on' : ''}`} role="switch" aria-checked={checked} onClick={() => onChange(!checked)}>
+      <span class="knob" />
+    </span>
+  )
 }
 
 // ---- App ----
@@ -97,7 +111,6 @@ export function App() {
   return <Shell route={route} />
 }
 
-// ---- Login ----
 function Login() {
   const [pwd, setPwd] = useState('')
   const [err, setErr] = useState('')
@@ -128,7 +141,6 @@ function Login() {
   )
 }
 
-// ---- Shell ----
 function Shell({ route }: { route: string }) {
   const logout = async () => {
     await api('/auth/logout', { method: 'POST' }).catch(() => {})
@@ -159,72 +171,37 @@ function Shell({ route }: { route: string }) {
 // ---- Dashboard ----
 function Dashboard() {
   const [profiles, setProfiles] = useState<Profile[]>([])
-  const [running, setRunning] = useState<string | null>(null)
-  const [err, setErr] = useState('')
-
   const load = () => api<{ profiles: Profile[] }>('/api/profiles').then((r) => setProfiles(r.profiles)).catch(() => {})
   useEffect(() => {
     load()
     const t = setInterval(load, 15000)
     return () => clearInterval(t)
   }, [])
-
-  const runNow = async (id: string) => {
-    setRunning(id)
-    setErr('')
-    try {
-      await api(`/api/profiles/${id}/run`, { method: 'POST' })
-      await load()
-    } catch (ex) {
-      setErr(ex instanceof Error ? ex.message : String(ex))
-    } finally {
-      setRunning(null)
-    }
-  }
-
   const failed = profiles.filter((p) => p.recentRuns[0] && p.recentRuns[0].status !== 'success')
-  const lastAny = profiles
-    .flatMap((p) => (p.recentRuns[0] ? [p.recentRuns[0].startedAt] : []))
-    .sort()
-    .pop()
-
+  const lastAny = profiles.flatMap((p) => (p.recentRuns[0] ? [p.recentRuns[0].startedAt] : [])).sort().pop()
   return (
     <div>
       <div class={`statusbar ${failed.length === 0 ? 'ok' : 'bad'}`}>
-        {failed.length === 0
-          ? `✅ 全部正常 · 最近备份 ${fmtTime(lastAny)}`
-          : `❌ ${failed.length} 项异常：${failed.map((p) => p.name).join('、')}`}
+        {failed.length === 0 ? `✅ 全部正常 · 最近备份 ${fmtTime(lastAny)}` : `❌ ${failed.length} 项异常：${failed.map((p) => p.name).join('、')}`}
       </div>
-      {err && <div class="banner-err">{err}</div>}
       <div class="cards">
         {profiles.map((p) => {
           const last = p.recentRuns[0]
-          const status = last?.status ?? 'never'
-          const cls = status === 'success' ? 'ok' : status === 'failed' ? 'bad' : 'idle'
+          const cls = last?.status === 'success' ? 'ok' : last?.status === 'failed' ? 'bad' : 'idle'
           return (
-            <div class={`card ${cls}`} key={p.id}>
+            <div class={`card ${p.enabled ? '' : 'card-off'}`} key={p.id}>
               <div class="card-head">
                 <span class="name">{p.name}</span>
                 {p.encrypt && <span class="badge">🔒</span>}
-                {p.isDraft && <span class="badge warn">草稿</span>}
-                {!p.enabled && <span class="badge warn">停用</span>}
+                <span style="margin-left:auto">
+                  <Toggle checked={p.enabled} onChange={() => toggleProfile(p.id, p.enabled).then(load)} />
+                </span>
               </div>
-              <div class="card-meta">
-                <span>{p.kind}</span> · <span>{scheduleLabel(p.schedule)}</span> · 保留 {p.keep} 份
-              </div>
+              <div class="card-meta">{p.kind} · {scheduleLabel(p.schedule)} · 保留 {p.keep} 份 · 目标 {p.targetIds.length === 0 ? '全部' : p.targetIds.length}</div>
               <div class="card-last">
-                {last ? (
-                  <>
-                    <span class={`dot ${cls}`} /> {status} · {fmtTime(last.startedAt)} · {fmtSize(last.sizeBytes)}
-                  </>
-                ) : (
-                  <span class="muted">从未备份（下次：{scheduleLabel(p.schedule)}）</span>
-                )}
+                {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)} · {fmtSize(last.sizeBytes)}</> : <span class="muted">从未备份</span>}
               </div>
               {last?.error && <div class="card-err">{last.error}</div>}
-              <button class="ghost sm" disabled={running === p.id} onClick={() => runNow(p.id)}>
-                {running === p.id ? '备份中…' : '立即备份'}
-              </button>
             </div>
           )
         })}
@@ -233,7 +210,12 @@ function Dashboard() {
   )
 }
 
-// ---- Profiles（档案管理：列表 + 编辑器） ----
+async function toggleProfile(id: string, enabled: boolean) {
+  await api(`/api/profiles/${id}/toggle`, { method: 'POST' })
+  void enabled
+}
+
+// ---- Profiles（分组展示 + 编辑器 + 扫描 + 还原） ----
 function Profiles() {
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [targets, setTargets] = useState<Target[]>([])
@@ -244,6 +226,7 @@ function Profiles() {
   const [scanning, setScanning] = useState(false)
   const [scanInfo, setScanInfo] = useState('')
   const [restoring, setRestoring] = useState<Profile | null>(null)
+  const [runningId, setRunningId] = useState<string | null>(null)
 
   const load = async () => {
     try {
@@ -260,6 +243,27 @@ function Profiles() {
   useEffect(() => {
     load()
   }, [])
+
+  const toggle = async (p: Profile) => {
+    setProfiles((s) => s.map((x) => (x.id === p.id ? { ...x, enabled: !x.enabled } : x)))
+    try {
+      await api(`/api/profiles/${p.id}/toggle`, { method: 'POST' })
+    } catch {
+      await load()
+    }
+  }
+
+  const runNow = async (id: string) => {
+    setRunningId(id)
+    try {
+      await api(`/api/profiles/${id}/run`, { method: 'POST' })
+      await load()
+    } catch (ex) {
+      setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
+    } finally {
+      setRunningId(null)
+    }
+  }
 
   const scan = async () => {
     setScanning(true)
@@ -282,10 +286,7 @@ function Profiles() {
 
   const adopt = async (d: DetectedDraft) => {
     try {
-      const r = await api<{ profile: Profile }>('/api/profiles/adopt', {
-        method: 'POST',
-        body: JSON.stringify({ draft: d }),
-      })
+      const r = await api<{ profile: Profile }>('/api/profiles/adopt', { method: 'POST', body: JSON.stringify({ draft: d }) })
       setDrafts((s) => s.filter((x) => x.containerName !== d.containerName))
       setMsg(`✅ 已添加「${r.profile.name}」（默认停用，请编辑确认后打开开关）`)
       await load()
@@ -296,33 +297,15 @@ function Profiles() {
     }
   }
 
-  const toggle = async (p: Profile) => {
-    setProfiles((s) => s.map((x) => (x.id === p.id ? { ...x, enabled: !x.enabled } : x)))
-    try {
-      await api(`/api/profiles/${p.id}/toggle`, { method: 'POST' })
-    } catch {
-      await load()
-    }
-  }
-
   const startEdit = (p: Profile | null) => {
     setIsNew(!p)
     setEditing(
       p
         ? { ...p }
         : {
-            id: '',
-            name: '',
-            kind: 'directory',
-            paths: [],
-            containers: [],
-            encrypt: false,
-            enabled: false,
-            isDraft: false,
-            schedule: { mode: 'daily', at: '03:00' },
-            targetIds: [],
-            keep: 7,
-            recentRuns: [],
+            id: '', name: '', kind: 'directory', paths: [], containers: [], encrypt: false,
+            enabled: false, isDraft: false, schedule: { mode: 'daily', at: '03:00' },
+            targetIds: [], keep: 7, recentRuns: [],
           },
     )
   }
@@ -461,7 +444,7 @@ function Profiles() {
       {drafts.length > 0 && (
         <div class="card wide detect-banner">
           <div class="card-head"><span class="name">🆕 检测到 {drafts.length} 个新应用</span></div>
-          <p class="muted">已按指纹生成建议配置。采纳后默认<strong>停用</strong>——请编辑确认细节（库名/路径/频率）后再打开开关。</p>
+          <p class="muted">已按指纹生成建议配置。采纳后默认<strong>停用</strong>——请编辑确认细节后再打开开关。</p>
           {drafts.map((d) => (
             <div class="detect-item" key={d.containerName}>
               <div>
@@ -474,52 +457,22 @@ function Profiles() {
         </div>
       )}
 
-      <div class="cards">
-        {profiles.map((p) => {
-          const last = p.recentRuns[0]
-          const cls = last?.status === 'success' ? 'ok' : last?.status === 'failed' ? 'bad' : 'idle'
-          return (
-            <div class={`card ${p.enabled ? '' : 'card-off'}`} key={p.id}>
-              <div class="card-head">
-                <span class="name">{p.name}</span>
-                {p.encrypt && <span class="badge">🔒</span>}
-                <span style="margin-left:auto">
-                  <Toggle checked={p.enabled} onChange={() => toggle(p)} />
-                </span>
-              </div>
-              <div class="card-meta">{p.kind} · {scheduleLabel(p.schedule)} · 保留 {p.keep} 份 · 目标 {p.targetIds.length === 0 ? '全部' : p.targetIds.length}</div>
-              <div class="card-last">
-                {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)} · {fmtSize(last.sizeBytes)}</> : <span class="muted">从未备份</span>}
-              </div>
-              {last?.error && <div class="card-err">{last.error}</div>}
-              <div class="btn-row">
-                <button class="ghost sm" disabled={scanning && false} onClick={() => runNowLocal(p.id)}>{'立即备份'}</button>
-                <button class="ghost sm" onClick={() => startEdit(p)}>编辑</button>
-                <button class="ghost sm" onClick={() => setRestoring(p)}>还原/下载</button>
-                <button class="ghost sm danger" onClick={() => remove(p.id)}>删除</button>
-              </div>
-            </div>
-          )
-        })}
-      </div>
+      {groupProfiles(profiles).map((group) => (
+        <GroupCard
+          key={group.key}
+          group={group}
+          runningId={runningId}
+          onRun={runNow}
+          onToggle={toggle}
+          onStartEdit={startEdit}
+          onRemove={remove}
+          onRestore={setRestoring}
+        />
+      ))}
+
       {restoring && <RestoreDialog profile={restoring} onClose={() => { setRestoring(null); load() }} />}
     </div>
   )
-
-  function runNowLocal(id: string) {
-    void (async () => {
-      try {
-        await api(`/api/profiles/${id}/run`, { method: 'POST' })
-        await load()
-      } catch (ex) {
-        setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
-      }
-    })()
-  }
-}
-
-function appBaseName(name: string): string {
-  return name.replace(/(数据|配置|文件|数据库|网关数据|静态站|自身)$/g, '').trim() || name
 }
 
 interface ProfileGroup {
@@ -528,7 +481,6 @@ interface ProfileGroup {
   items: Profile[]
 }
 
-/** 把档案按「同一应用」分组（基础名相同即同组）；单档案组也统一走组卡片渲染 */
 function groupProfiles(profiles: Profile[]): ProfileGroup[] {
   const map = new Map<string, Profile[]>()
   for (const p of profiles) {
@@ -536,32 +488,24 @@ function groupProfiles(profiles: Profile[]): ProfileGroup[] {
     if (!map.has(base)) map.set(base, [])
     map.get(base)?.push(p)
   }
-  return [...map.entries()].map(([appName, items]) => ({
-    key: items[0]?.id ?? appName,
-    appName,
-    items,
-  }))
+  return [...map.entries()].map(([appName, items]) => ({ key: items[0]?.id ?? appName, appName, items }))
 }
 
-/** 应用组卡片：单档案直接展开；多档案 Tab 切换 */
-function AppGroupCard(props: {
+function GroupCard(props: {
   group: ProfileGroup
-  running: string | null
+  runningId: string | null
   onRun: (id: string) => void
   onToggle: (p: Profile) => void
   onStartEdit: (p: Profile) => void
   onRemove: (id: string) => void
+  onRestore: (p: Profile) => void
 }) {
-  try {
-  const { group, running, onRun, onToggle, onStartEdit, onRemove } = props
-  window.__gLog = (window.__gLog || [])
-  window.__gLog.push({ app: group.appName, items: group.items.length, first: group.items[0]?.name })
+  const { group, runningId, onRun, onToggle, onStartEdit, onRemove, onRestore } = props
   const [activeId, setActiveId] = useState(group.items[0]?.id ?? '')
   const active = group.items.find((x) => x.id === activeId) ?? group.items[0]
   if (!active) return null
   const last = active.recentRuns[0]
   const cls = last?.status === 'success' ? 'ok' : last?.status === 'failed' ? 'bad' : 'idle'
-
   return (
     <div class={`card group-card ${active.enabled ? '' : 'card-off'}`}>
       <div class="card-head">
@@ -575,7 +519,7 @@ function AppGroupCard(props: {
         <div class="tab-row">
           {group.items.map((item) => (
             <button key={item.id} class={`tab ${item.id === active.id ? 'on' : ''}`} onClick={() => setActiveId(item.id)}>
-              {item.name.slice(group.appName.length).replace(/^[^\u4e00-\u9fa5a-zA-Z0-9]+/, '') || item.kind}
+              {item.name.slice(group.appName.length).replace(/^[\s·-]+/, '') || item.kind}
             </button>
           ))}
         </div>
@@ -588,39 +532,16 @@ function AppGroupCard(props: {
       </div>
       {last?.error && <div class="card-err">{last.error}</div>}
       <div class="btn-row">
-        <button class="ghost sm" disabled={running === active.id} onClick={() => onRun(active.id)}>{running === active.id ? '备份中…' : '立即备份'}</button>
+        <button class="ghost sm" disabled={runningId === active.id} onClick={() => onRun(active.id)}>{runningId === active.id ? '备份中…' : '立即备份'}</button>
         <button class="ghost sm" onClick={() => onStartEdit(active)}>编辑</button>
-        <button class="ghost sm" onClick={() => setRestoringViaEvent(active)}>还原/下载</button>
+        <button class="ghost sm" onClick={() => onRestore(active)}>还原/下载</button>
         <button class="ghost sm danger" onClick={() => onRemove(active.id)}>删除</button>
       </div>
     </div>
   )
-  } catch (e) {
-    ;(window.__errs = window.__errs || []).push('GROUP: ' + (e instanceof Error ? e.stack?.slice(0, 300) : String(e)))
-    return <div class="card">⚠️ 组卡片渲染失败：{String(e)}</div>
-  }
 }
 
-// 组卡片内触发还原弹窗：通过自定义事件向上传递（保持组件无状态依赖）
-function setRestoringViaEvent(p: Profile): void {
-  window.dispatchEvent(new CustomEvent('ab-restore', { detail: p.id }))
-}
-
-/** iOS 风格滑动开关 */
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <span
-      class={`ios-toggle ${checked ? 'on' : ''}`}
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-    >
-      <span class="knob" />
-    </span>
-  )
-}
-
-// ---- Restore（还原流程：选快照 → 预览 or RED 确认覆盖） ----
+// ---- RestoreDialog ----
 interface ArtifactInfo {
   runId: string
   artifactPath: string
@@ -634,7 +555,7 @@ function RestoreDialog({ profile, onClose }: { profile: Profile; onClose: () => 
   const [artifacts, setArtifacts] = useState<ArtifactInfo[]>([])
   const [selected, setSelected] = useState<ArtifactInfo | null>(null)
   const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<{ steps: string[]; previewDir?: string; preRestoreBackup?: string; mode: string } | null>(null)
+  const [result, setResult] = useState<{ steps: string[]; preRestoreBackup?: string; mode: string } | null>(null)
   const [err, setErr] = useState('')
   const [confirmText, setConfirmText] = useState('')
   const [showInplace, setShowInplace] = useState(false)
@@ -653,7 +574,7 @@ function RestoreDialog({ profile, onClose }: { profile: Profile; onClose: () => 
     setBusy(true)
     setErr('')
     try {
-      const r = await api<{ steps: string[]; previewDir?: string; preRestoreBackup?: string; mode: string }>(
+      const r = await api<{ steps: string[]; preRestoreBackup?: string; mode: string }>(
         `/api/profiles/${profile.id}/restore`,
         { method: 'POST', body: JSON.stringify({ runId: selected.runId, mode, confirmName: mode === 'inplace' ? confirmText : undefined }) },
       )
@@ -669,31 +590,22 @@ function RestoreDialog({ profile, onClose }: { profile: Profile; onClose: () => 
     <div class="modal-mask" onClick={(e) => e.target === e.currentTarget && onClose()}>
       <div class="card wide editor modal">
         <div class="card-head">
-          <span class="name">还原：{profile.name}</span>
+          <span class="name">还原/下载：{profile.name}</span>
           <button class="ghost sm" onClick={onClose}>✕</button>
         </div>
-
         {result ? (
           <div>
-            <div class={`statusbar ${result.mode === 'preview' ? 'ok' : 'ok'}`}>
-              {result.mode === 'preview' ? '✅ 预览解包完成（生产数据未动）' : '✅ 正式还原完成'}
-            </div>
+            <div class="statusbar ok">{result.mode === 'preview' ? '✅ 预览解包完成（生产数据未动）' : '✅ 正式还原完成'}</div>
             <ol class="steps">
-              {result.steps.map((s, i) => (
-                <li key={i}>{s}</li>
-              ))}
+              {result.steps.map((s, i) => <li key={i}>{s}</li>)}
             </ol>
-            {result.preRestoreBackup && (
-              <div class="banner-ok">还原前数据已兜底：{result.preRestoreBackup}（如需回退可手动拷回）</div>
-            )}
-            <div class="btn-row">
-              <button onClick={onClose}>关闭</button>
-            </div>
+            {result.preRestoreBackup && <div class="banner-ok">还原前数据已兜底：{result.preRestoreBackup}</div>}
+            <div class="btn-row"><button onClick={onClose}>关闭</button></div>
           </div>
         ) : (
           <div>
-            <p class="muted">选择要还原的本地快照（仅显示本地 artifact 还存在的）：</p>
-            {artifacts.length === 0 && <div class="muted">没有可用的本地快照。远端 WebDAV 上的备份请下载后放入 artifacts/ 目录。</div>}
+            <p class="muted">选择快照（仅显示本地还存在的）：行尾可下载备份包到你的设备。</p>
+            {artifacts.length === 0 && <div class="muted">没有可用的本地快照。</div>}
             <div class="snapshot-list">
               {artifacts.map((a) => (
                 <div class={`snapshot-item ${!a.exists ? 'muted' : ''}`} key={a.runId}>
@@ -704,16 +616,14 @@ function RestoreDialog({ profile, onClose }: { profile: Profile; onClose: () => 
                   </label>
                   {a.exists && (
                     <span class="dl-links">
-                      <a href={`/api/artifacts/download?runId=${encodeURIComponent(a.runId)}`} class="ghost sm dl-btn" title="下载备份包">⬇ 包</a>
-                      <a href={`/api/artifacts/download?path=${encodeURIComponent(a.artifactPath.replace(/\.tar\.gz(\.age)?$/, '.manifest.json'))}`} class="ghost sm dl-btn" title="下载清单">清单</a>
+                      <a href={`/api/artifacts/download?runId=${encodeURIComponent(a.runId)}`} class="ghost sm dl-btn">⬇ 包</a>
+                      <a href={`/api/artifacts/download?path=${encodeURIComponent(a.artifactPath.replace(/\.tar\.gz(\.age)?$/, '.manifest.json'))}`} class="ghost sm dl-btn">清单</a>
                     </span>
                   )}
                 </div>
               ))}
             </div>
-
             {err && <div class="banner-err">{err}</div>}
-
             {!showInplace ? (
               <div class="btn-row">
                 <button disabled={!selected || busy} onClick={() => doRestore('preview')}>{busy ? '解包中…' : '📦 预览解包（不动生产数据）'}</button>
@@ -722,7 +632,7 @@ function RestoreDialog({ profile, onClose }: { profile: Profile; onClose: () => 
             ) : (
               <div class="red-zone">
                 <div class="red-title">RED 级操作：正式还原将覆盖当前数据</div>
-                <p>将覆盖档案「<strong>{profile.name}</strong>」的现有数据（还原前会自动做兜底备份）。</p>
+                <p>将覆盖档案「<strong>{profile.name}</strong>」的现有数据（还原前自动兜底备份）。</p>
                 <p>请输入档案名 <strong>{profile.name}</strong> 确认：</p>
                 <input value={confirmText} onInput={(e) => setConfirmText((e.target as HTMLInputElement).value)} placeholder={profile.name} />
                 <div class="btn-row">
@@ -740,7 +650,7 @@ function RestoreDialog({ profile, onClose }: { profile: Profile; onClose: () => 
   )
 }
 
-// ---- Targets（多供应商管理） ----
+// ---- Targets ----
 function Targets() {
   const [targets, setTargets] = useState<Target[]>([])
   const [editing, setEditing] = useState<Partial<Target> & { password?: string } | null>(null)
@@ -753,7 +663,6 @@ function Targets() {
     load()
   }, [])
 
-  /** iOS 风格启停开关（乐观更新，失败回滚） */
   const toggle = async (t: Target) => {
     setTargets((s) => s.map((x) => (x.id === t.id ? { ...x, enabled: !x.enabled } : x)))
     try {
@@ -794,10 +703,7 @@ function Targets() {
   const testSaved = async (id: string) => {
     setTesting(id)
     try {
-      const r = await api<{ ok: boolean; message: string }>('/api/targets/test', {
-        method: 'POST',
-        body: JSON.stringify({ targetId: id }),
-      })
+      const r = await api<{ ok: boolean; message: string }>('/api/targets/test', { method: 'POST', body: JSON.stringify({ targetId: id }) })
       setTestResult((s) => ({ ...s, [id]: `${r.ok ? '✅' : '❌'} ${r.message}` }))
     } catch (ex) {
       setTestResult((s) => ({ ...s, [id]: `❌ ${ex instanceof Error ? ex.message : String(ex)}` }))
@@ -820,7 +726,7 @@ function Targets() {
         <div class="card-head">
           <span class="name">{t.id ? `编辑：${t.name}` : '添加 WebDAV 目标'}</span>
         </div>
-        <p class="muted">支持任意标准 WebDAV 供应商：Koofr、坚果云、InfiniCloud、群晖、Alist、Nextcloud…</p>
+        <p class="muted">支持任意标准 WebDAV：Koofr、坚果云、InfiniCloud、群晖、Alist、Nextcloud…</p>
         <div class="form-grid">
           <label>名称 <input value={t.name ?? ''} onInput={(e) => upd({ name: (e.target as HTMLInputElement).value })} placeholder="如 Koofr 主力 / 群晖家用" /></label>
           <label class="full">
@@ -829,15 +735,15 @@ function Targets() {
           <label>用户名 <input value={t.username ?? ''} onInput={(e) => upd({ username: (e.target as HTMLInputElement).value })} /></label>
           <label>密码 <input type="password" value={t.password ?? ''} onInput={(e) => upd({ password: (e.target as HTMLInputElement).value })} placeholder={t.hasPassword ? '••••••（留空保持不变）' : '应用专用密码'} /></label>
           <label>保留份数（默认） <input type="number" min={3} max={365} value={t.keep ?? 7} onInput={(e) => upd({ keep: Number((e.target as HTMLInputElement).value) })} /></label>
-          <label>容量配额 GB（可选，触发自动裁剪） <input type="number" min={0} value={t.capacityQuotaMb ? (t.capacityQuotaMb / 1024).toFixed(0) : ''} onInput={(e) => upd({ capacityQuotaMb: Number((e.target as HTMLInputElement).value) * 1024 || undefined })} placeholder="如 10" /></label>
+          <label>容量配额 GB（可选） <input type="number" min={0} value={t.capacityQuotaMb ? (t.capacityQuotaMb / 1024).toFixed(0) : ''} onInput={(e) => upd({ capacityQuotaMb: Number((e.target as HTMLInputElement).value) * 1024 || undefined })} placeholder="如 10" /></label>
           <label>上传超时（分钟） <input type="number" min={5} max={240} value={t.timeoutMin ?? 30} onInput={(e) => upd({ timeoutMin: Number((e.target as HTMLInputElement).value) })} /></label>
         </div>
         <label class="check-item">
-          <Toggle checked={t.allowUnencrypted ?? true} onChange={(v) => upd({ allowUnencrypted: v })} /> 允许未加密备份（关闭则只收加密包，强烈建议敏感服务器关闭）
+          <Toggle checked={t.allowUnencrypted ?? true} onChange={(v) => upd({ allowUnencrypted: v })} /> 允许未加密备份（关闭则只收加密包）
         </label>
         {t.id && (
           <label class="check-item">
-            <Toggle checked={t.enabled ?? true} onChange={(v) => upd({ enabled: v })} /> 启用此目标（关闭后档案推送会跳过它）
+            <Toggle checked={t.enabled ?? true} onChange={(v) => upd({ enabled: v })} /> 启用此目标
           </label>
         )}
         {testResult[t.id ?? 'form'] && <div class="banner-ok">{testResult[t.id ?? 'form']}</div>}
