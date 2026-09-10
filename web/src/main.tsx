@@ -1,14 +1,32 @@
 import { render } from 'preact'
-import { useState, useEffect } from 'preact/hooks'
+import { useState, useEffect, useRef } from 'preact/hooks'
 import './style.css'
 
-// ---- types ----
+// ---- types（与后端对齐） ----
+
+
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      class={`ios-toggle ${checked ? 'on' : ''}`}
+      aria-pressed={checked}
+      onClick={() => onChange(!checked)}
+    >
+      <span class="knob" />
+    </button>
+  )
+}
+
 interface RunPublic {
   id: string
   profileId: string
   trigger: string
   status: string
+  stage: string
   startedAt: string
+  finishedAt?: string
+  durationMs?: number
   sizeBytes?: number
   encrypted: boolean
   pushes: { targetId: string; status: string; attempts: number; error?: string }[]
@@ -30,6 +48,7 @@ interface Profile {
   schedule: ScheduleSpec
   targetIds: string[]
   keep: number
+  lastRunAt?: string
   recentRuns: RunPublic[]
 }
 interface Target {
@@ -44,19 +63,10 @@ interface Target {
   timeoutMin: number
   allowUnencrypted: boolean
 }
-interface DetectedDraft {
-  containerName: string
-  image: string
-  mounts: { type: string; source: string; dest: string }[]
-  suggestedProfile: Partial<Profile> & { name?: string }
-  confidence: string
-}
 
-// ---- API ----
+// ---- API helpers ----
 async function api<T>(path: string, opts?: RequestInit): Promise<T> {
-  const headers: Record<string, string> = { ...(opts?.headers as Record<string, string>) }
-  if (opts?.body) headers['Content-Type'] = 'application/json'
-  const res = await fetch(path, { ...opts, headers })
+  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts })
   if (res.status === 401 && !path.startsWith('/auth/')) {
     window.location.hash = '#/login'
     throw new Error('unauthorized')
@@ -75,32 +85,28 @@ function fmtSize(n?: number): string {
 function fmtTime(iso?: string): string {
   if (!iso) return '—'
   const d = new Date(iso)
-  const mins = Math.floor((Date.now() - d.getTime()) / 60000)
+  const diff = Date.now() - d.getTime()
+  const mins = Math.floor(diff / 60000)
   if (mins < 1) return '刚刚'
   if (mins < 60) return `${mins} 分钟前`
   if (mins < 24 * 60) return `${Math.floor(mins / 60)} 小时前`
   return d.toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 }
 function scheduleLabel(s: ScheduleSpec): string {
-  if (!s) return '—'
   if (s.mode === 'daily') return `每天 ${s.at}`
   return `每 ${s.hours} 小时`
-}
-function appBaseName(name: string): string {
-  return name.replace(/(数据|配置|文件|数据库|网关数据|静态站|自身)$/g, '').trim() || name
-}
-
-// ---- Toggle (iOS 风格) ----
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <span class={`ios-toggle ${checked ? 'on' : ''}`} role="switch" aria-checked={checked} onClick={() => onChange(!checked)}>
-      <span class="knob" />
-    </span>
-  )
 }
 
 // ---- App ----
 export function App() {
+  try {
+  return <AppInner />
+  } catch (e) {
+  return <div style="color:red;padding:20px">APP ERROR: {String(e)}</div>
+  }
+}
+
+function AppInner() {
   const [route, setRoute] = useState(window.location.hash || '#/dashboard')
   useEffect(() => {
     const onHash = () => setRoute(window.location.hash || '#/dashboard')
@@ -111,6 +117,7 @@ export function App() {
   return <Shell route={route} />
 }
 
+// ---- Login ----
 function Login() {
   const [pwd, setPwd] = useState('')
   const [err, setErr] = useState('')
@@ -141,6 +148,7 @@ function Login() {
   )
 }
 
+// ---- Shell ----
 function Shell({ route }: { route: string }) {
   const logout = async () => {
     await api('/auth/logout', { method: 'POST' }).catch(() => {})
@@ -171,37 +179,84 @@ function Shell({ route }: { route: string }) {
 // ---- Dashboard ----
 function Dashboard() {
   const [profiles, setProfiles] = useState<Profile[]>([])
+  const [running, setRunning] = useState<string | null>(null)
+  const [err, setErr] = useState('')
+
   const load = () => api<{ profiles: Profile[] }>('/api/profiles').then((r) => setProfiles(r.profiles)).catch(() => {})
   useEffect(() => {
     load()
     const t = setInterval(load, 15000)
     return () => clearInterval(t)
   }, [])
+
+
+  const toggle = async (p: Profile) => {
+    try {
+      await api(`/api/profiles/${p.id}/toggle`, { method: 'POST' })
+      await load()
+    } catch {
+      /* 15s 轮询会刷新 */
+    }
+  }
+
+  const runNow = async (id: string) => {
+    setRunning(id)
+    setErr('')
+    try {
+      await api(`/api/profiles/${id}/run`, { method: 'POST' })
+      await load()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setRunning(null)
+    }
+  }
+
   const failed = profiles.filter((p) => p.recentRuns[0] && p.recentRuns[0].status !== 'success')
-  const lastAny = profiles.flatMap((p) => (p.recentRuns[0] ? [p.recentRuns[0].startedAt] : [])).sort().pop()
+  const lastAny = profiles
+    .flatMap((p) => (p.recentRuns[0] ? [p.recentRuns[0].startedAt] : []))
+    .sort()
+    .pop()
+
   return (
     <div>
       <div class={`statusbar ${failed.length === 0 ? 'ok' : 'bad'}`}>
-        {failed.length === 0 ? `✅ 全部正常 · 最近备份 ${fmtTime(lastAny)}` : `❌ ${failed.length} 项异常：${failed.map((p) => p.name).join('、')}`}
+        {failed.length === 0
+          ? `✅ 全部正常 · 最近备份 ${fmtTime(lastAny)}`
+          : `❌ ${failed.length} 项异常：${failed.map((p) => p.name).join('、')}`}
       </div>
+      {err && <div class="banner-err">{err}</div>}
       <div class="cards">
         {profiles.map((p) => {
           const last = p.recentRuns[0]
-          const cls = last?.status === 'success' ? 'ok' : last?.status === 'failed' ? 'bad' : 'idle'
+          const status = last?.status ?? 'never'
+          const cls = status === 'success' ? 'ok' : status === 'failed' ? 'bad' : 'idle'
           return (
-            <div class={`card ${p.enabled ? '' : 'card-off'}`} key={p.id}>
+            <div class={`card ${cls}`} key={p.id}>
               <div class="card-head">
                 <span class="name">{p.name}</span>
                 {p.encrypt && <span class="badge">🔒</span>}
+                {p.isDraft && <span class="badge warn">草稿</span>}
                 <span style="margin-left:auto">
-                  <Toggle checked={p.enabled} onChange={() => toggleProfile(p.id, p.enabled).then(load)} />
+                  <Toggle checked={p.enabled} onChange={() => toggle(p)} />
                 </span>
               </div>
-              <div class="card-meta">{p.kind} · {scheduleLabel(p.schedule)} · 保留 {p.keep} 份 · 目标 {p.targetIds.length === 0 ? '全部' : p.targetIds.length}</div>
+              <div class="card-meta">
+                <span>{p.kind}</span> · <span>{scheduleLabel(p.schedule)}</span> · 保留 {p.keep} 份
+              </div>
               <div class="card-last">
-                {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)} · {fmtSize(last.sizeBytes)}</> : <span class="muted">从未备份</span>}
+                {last ? (
+                  <>
+                    <span class={`dot ${cls}`} /> {status} · {fmtTime(last.startedAt)} · {fmtSize(last.sizeBytes)}
+                  </>
+                ) : (
+                  <span class="muted">从未备份（下次：{scheduleLabel(p.schedule)}）</span>
+                )}
               </div>
               {last?.error && <div class="card-err">{last.error}</div>}
+              <button class="ghost sm" disabled={running === p.id} onClick={() => runNow(p.id)}>
+                {running === p.id ? '备份中…' : '立即备份'}
+              </button>
             </div>
           )
         })}
@@ -210,60 +265,14 @@ function Dashboard() {
   )
 }
 
-async function toggleProfile(id: string, enabled: boolean) {
-  await api(`/api/profiles/${id}/toggle`, { method: 'POST' })
-  void enabled
-}
-
-// ---- Profiles（分组展示 + 编辑器 + 扫描 + 还原） ----
+// ---- Profiles（档案管理：列表 + 编辑器） ----
 function Profiles() {
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [targets, setTargets] = useState<Target[]>([])
-  const [editing, setEditing] = useState<Profile | null>(null)
-  const [isNew, setIsNew] = useState(false)
-  const [msg, setMsg] = useState('')
   const [drafts, setDrafts] = useState<DetectedDraft[]>([])
   const [scanning, setScanning] = useState(false)
   const [scanInfo, setScanInfo] = useState('')
   const [restoring, setRestoring] = useState<Profile | null>(null)
-  const [runningId, setRunningId] = useState<string | null>(null)
-
-  const load = async () => {
-    try {
-      const [pr, tg] = await Promise.all([
-        api<{ profiles: Profile[] }>('/api/profiles'),
-        api<{ targets: Target[] }>('/api/targets'),
-      ])
-      setProfiles(pr.profiles)
-      setTargets(tg.targets)
-    } catch (ex) {
-      setMsg(`加载失败：${ex instanceof Error ? ex.message : String(ex)}`)
-    }
-  }
-  useEffect(() => {
-    load()
-  }, [])
-
-  const toggle = async (p: Profile) => {
-    setProfiles((s) => s.map((x) => (x.id === p.id ? { ...x, enabled: !x.enabled } : x)))
-    try {
-      await api(`/api/profiles/${p.id}/toggle`, { method: 'POST' })
-    } catch {
-      await load()
-    }
-  }
-
-  const runNow = async (id: string) => {
-    setRunningId(id)
-    try {
-      await api(`/api/profiles/${id}/run`, { method: 'POST' })
-      await load()
-    } catch (ex) {
-      setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
-    } finally {
-      setRunningId(null)
-    }
-  }
 
   const scan = async () => {
     setScanning(true)
@@ -290,12 +299,25 @@ function Profiles() {
       setDrafts((s) => s.filter((x) => x.containerName !== d.containerName))
       setMsg(`✅ 已添加「${r.profile.name}」（默认停用，请编辑确认后打开开关）`)
       await load()
-      setIsNew(true)
-      setEditing({ ...r.profile, recentRuns: [] })
     } catch (ex) {
       setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
     }
   }
+  const [editing, setEditing] = useState<Profile | null>(null)
+  const [isNew, setIsNew] = useState(false)
+  const [msg, setMsg] = useState('')
+
+  const load = async () => {
+    const [pr, tg] = await Promise.all([
+      api<{ profiles: Profile[] }>('/api/profiles'),
+      api<{ targets: Target[] }>('/api/targets'),
+    ])
+    setProfiles(pr.profiles)
+    setTargets(tg.targets)
+  }
+  useEffect(() => {
+    load()
+  }, [])
 
   const startEdit = (p: Profile | null) => {
     setIsNew(!p)
@@ -303,9 +325,18 @@ function Profiles() {
       p
         ? { ...p }
         : {
-            id: '', name: '', kind: 'directory', paths: [], containers: [], encrypt: false,
-            enabled: false, isDraft: false, schedule: { mode: 'daily', at: '03:00' },
-            targetIds: [], keep: 7, recentRuns: [],
+            id: '',
+            name: '',
+            kind: 'directory',
+            paths: [],
+            containers: [],
+            encrypt: false,
+            enabled: true,
+            isDraft: false,
+            schedule: { mode: 'daily', at: '03:00' },
+            targetIds: [],
+            keep: 7,
+            recentRuns: [],
           },
     )
   }
@@ -315,7 +346,7 @@ function Profiles() {
     setMsg('')
     try {
       const body: Record<string, unknown> = { ...editing }
-      if (isNew) delete body.recentRuns
+      if (isNew) delete (body as { recentRuns?: unknown }).recentRuns
       await api('/api/profiles', { method: 'POST', body: JSON.stringify(body) })
       setMsg('✅ 已保存')
       setEditing(null)
@@ -334,23 +365,11 @@ function Profiles() {
   if (editing) {
     const p = editing
     const upd = (patch: Partial<Profile>) => setEditing({ ...p, ...patch })
-    // 同应用的其他档案（数据/配置等）——切 Tab 直接切换编辑对象
-    const siblings = profiles.filter((x) => x.id !== p.id && appBaseName(x.name) === appBaseName(p.name))
     return (
       <div class="card wide editor">
         <div class="card-head">
-          <span class="name">{isNew ? '新建备份档案' : `编辑：${appBaseName(p.name)}`}</span>
+          <span class="name">{isNew ? '新建备份档案' : `编辑：${p.name}`}</span>
         </div>
-        {!isNew && siblings.length > 0 && (
-          <div class="tab-row editor-tabs">
-            <button class={`tab on`} onClick={() => {}}>{p.name.slice(appBaseName(p.name).length).replace(/^[\s·-]+/, '') || p.kind}</button>
-            {siblings.map((s) => (
-              <button key={s.id} class="tab" onClick={() => { setEditing({ ...s, recentRuns: s.recentRuns ?? [] }); setMsg('') }}>
-                {s.name.slice(appBaseName(s.name).length).replace(/^[\s·-]+/, '') || s.kind}
-              </button>
-            ))}
-          </div>
-        )}
         {msg && <div class="banner-ok">{msg}</div>}
         <div class="form-grid">
           <label>名称 <input value={p.name} onInput={(e) => upd({ name: (e.target as HTMLInputElement).value })} /></label>
@@ -430,7 +449,7 @@ function Profiles() {
         </div>
         <div class="check-row">
           <label class="check-item">
-            <Toggle checked={p.encrypt} onChange={(v) => upd({ encrypt: v })} /> age 加密（敏感数据建议开）
+            <input type="checkbox" checked={p.encrypt} onChange={(e) => upd({ encrypt: (e.target as HTMLInputElement).checked })} /> age 加密（敏感数据建议开）
           </label>
           <label class="check-item">
             <Toggle checked={p.enabled} onChange={(v) => upd({ enabled: v })} /> 启用备份
@@ -453,10 +472,11 @@ function Profiles() {
         {scanInfo && <span class="muted" style="margin-left:10px">{scanInfo}</span>}
       </div>
 
+      {restoring && <RestoreDialog profile={restoring} onClose={() => { setRestoring(null); load() }} />}
       {drafts.length > 0 && (
         <div class="card wide detect-banner">
           <div class="card-head"><span class="name">🆕 检测到 {drafts.length} 个新应用</span></div>
-          <p class="muted">已按指纹生成建议配置。采纳后默认<strong>停用</strong>——请编辑确认细节后再打开开关。</p>
+          <p class="muted">采纳后默认<strong>停用</strong>——请编辑确认细节后再打开开关。</p>
           {drafts.map((d) => (
             <div class="detect-item" key={d.containerName}>
               <div>
@@ -468,92 +488,196 @@ function Profiles() {
           ))}
         </div>
       )}
-
-      {groupProfiles(profiles).map((group) => (
-        <GroupCard
-          key={group.key}
-          group={group}
-          runningId={runningId}
-          onRun={runNow}
-          onToggle={toggle}
-          onStartEdit={startEdit}
-          onRemove={remove}
-          onRestore={setRestoring}
-        />
-      ))}
-
-      {restoring && <RestoreDialog profile={restoring} onClose={() => { setRestoring(null); load() }} />}
+      <div class="cards">
+        {profiles.map((p) => {
+          const last = p.recentRuns[0]
+          const cls = last?.status === 'success' ? 'ok' : last?.status === 'failed' ? 'bad' : 'idle'
+          return (
+            <div class="card" key={p.id}>
+              <div class="card-head">
+                <span class="name">{p.name}</span>
+                {p.encrypt && <span class="badge">🔒</span>}
+                <span style="margin-left:auto">
+                  <Toggle checked={p.enabled} onChange={() => toggle(p)} />
+                </span>
+              </div>
+              <div class="card-meta">{p.kind} · {scheduleLabel(p.schedule)} · 保留 {p.keep} 份 · 目标 {p.targetIds.length === 0 ? '全部' : p.targetIds.length}</div>
+              <div class="card-last">
+                {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)}</> : <span class="muted">从未备份</span>}
+              </div>
+              <div class="btn-row">
+                <button class="ghost sm" onClick={() => startEdit(p)}>编辑</button>
+                <button class="ghost sm" onClick={() => setRestoring(p)}>还原/下载</button>
+                <button class="ghost sm danger" onClick={() => remove(p.id)}>删除</button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
     </div>
   )
 }
 
-interface ProfileGroup {
-  key: string
-  appName: string
-  items: Profile[]
-}
+// ---- Targets（多供应商管理） ----
+function Targets() {
+  const [targets, setTargets] = useState<Target[]>([])
+  const [editing, setEditing] = useState<Partial<Target> & { password?: string } | null>(null)
+  const [testing, setTesting] = useState<string | null>(null)
+  const [testResult, setTestResult] = useState<Record<string, string>>({})
+  const [msg, setMsg] = useState('')
 
-function groupProfiles(profiles: Profile[]): ProfileGroup[] {
-  const map = new Map<string, Profile[]>()
-  for (const p of profiles) {
-    const base = appBaseName(p.name)
-    if (!map.has(base)) map.set(base, [])
-    map.get(base)?.push(p)
+  const load = () => api<{ targets: Target[] }>('/api/targets').then((r) => setTargets(r.targets))
+  useEffect(() => {
+    load()
+  }, [])
+
+  const save = async () => {
+    if (!editing) return
+    setMsg('')
+    try {
+      await api('/api/targets', { method: 'POST', body: JSON.stringify(editing) })
+      setMsg('✅ 已保存')
+      setEditing(null)
+      await load()
+    } catch (ex) {
+      setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
+    }
   }
-  return [...map.entries()].map(([appName, items]) => ({ key: items[0]?.id ?? appName, appName, items }))
-}
 
-function GroupCard(props: {
-  group: ProfileGroup
-  runningId: string | null
-  onRun: (id: string) => void
-  onToggle: (p: Profile) => void
-  onStartEdit: (p: Profile) => void
-  onRemove: (id: string) => void
-  onRestore: (p: Profile) => void
-}) {
-  const { group, runningId, onRun, onToggle, onStartEdit, onRemove, onRestore } = props
-  const [activeId, setActiveId] = useState(group.items[0]?.id ?? '')
-  const active = group.items.find((x) => x.id === activeId) ?? group.items[0]
-  if (!active) return null
-  const last = active.recentRuns[0]
-  const cls = last?.status === 'success' ? 'ok' : last?.status === 'failed' ? 'bad' : 'idle'
-  return (
-    <div class={`card group-card ${active.enabled ? '' : 'card-off'}`}>
-      <div class="card-head">
-        <span class="name">{group.appName}</span>
-        {active.encrypt && <span class="badge">🔒</span>}
-        <span style="margin-left:auto">
-          <Toggle checked={active.enabled} onChange={() => onToggle(active)} />
-        </span>
-      </div>
-      {group.items.length > 1 && (
-        <div class="tab-row">
-          {group.items.map((item) => (
-            <button key={item.id} class={`tab ${item.id === active.id ? 'on' : ''}`} onClick={() => setActiveId(item.id)}>
-              {item.name.slice(group.appName.length).replace(/^[\s·-]+/, '') || item.kind}
-            </button>
-          ))}
+  const test = async (t: Partial<Target> & { password?: string }) => {
+    setTesting('form')
+    try {
+      const r = await api<{ ok: boolean; message: string }>('/api/targets/test', {
+        method: 'POST',
+        body: JSON.stringify({ url: t.url, username: t.username, password: t.password, targetId: t.id }),
+      })
+      setTestResult((s) => ({ ...s, [t.id ?? 'form']: `${r.ok ? '✅' : '❌'} ${r.message}` }))
+    } catch (ex) {
+      setTestResult((s) => ({ ...s, [t.id ?? 'form']: `❌ ${ex instanceof Error ? ex.message : String(ex)}` }))
+    } finally {
+      setTesting(null)
+    }
+  }
+
+  const testSaved = async (id: string) => {
+    setTesting(id)
+    try {
+      const r = await api<{ ok: boolean; message: string }>('/api/targets/test', {
+        method: 'POST',
+        body: JSON.stringify({ targetId: id }),
+      })
+      setTestResult((s) => ({ ...s, [id]: `${r.ok ? '✅' : '❌'} ${r.message}` }))
+    } catch (ex) {
+      setTestResult((s) => ({ ...s, [id]: `❌ ${ex instanceof Error ? ex.message : String(ex)}` }))
+    } finally {
+      setTesting(null)
+    }
+  }
+
+  const remove = async (id: string) => {
+    if (!confirm('确认删除该 WebDAV 目标？绑定它的档案将不再推送。')) return
+    await api(`/api/targets/${id}`, { method: 'DELETE' })
+    await load()
+  }
+
+  if (editing) {
+    const t = editing
+    const upd = (patch: Partial<Target> & { password?: string }) => setEditing({ ...t, ...patch })
+    return (
+      <div class="card wide editor">
+        <div class="card-head">
+          <span class="name">{t.id ? `编辑：${t.name}` : '添加 WebDAV 目标'}</span>
         </div>
-      )}
-      <div class="card-meta">
-        {active.kind} · {scheduleLabel(active.schedule)} · 保留 {active.keep} 份 · 目标 {active.targetIds.length === 0 ? '全部' : active.targetIds.length}
+        <p class="muted">支持任意标准 WebDAV 供应商：Koofr、坚果云、InfiniCloud、群晖、Alist、Nextcloud…</p>
+        <div class="form-grid">
+          <label>名称 <input value={t.name ?? ''} onInput={(e) => upd({ name: (e.target as HTMLInputElement).value })} placeholder="如 Koofr 主力 / 群晖家用" /></label>
+          <label class="full">
+            WebDAV 地址 <input value={t.url ?? ''} onInput={(e) => upd({ url: (e.target as HTMLInputElement).value })} placeholder="https://app.koofr.net/dav/Koofr/autobackup" />
+          </label>
+          <label>用户名 <input value={t.username ?? ''} onInput={(e) => upd({ username: (e.target as HTMLInputElement).value })} /></label>
+          <label>密码 <input type="password" value={t.password ?? ''} onInput={(e) => upd({ password: (e.target as HTMLInputElement).value })} placeholder={t.hasPassword ? '••••••（留空保持不变）' : '应用专用密码'} /></label>
+          <label>保留份数（默认） <input type="number" min={3} max={365} value={t.keep ?? 7} onInput={(e) => upd({ keep: Number((e.target as HTMLInputElement).value) })} /></label>
+          <label>容量配额 GB（可选，触发自动裁剪） <input type="number" min={0} value={t.capacityQuotaMb ? (t.capacityQuotaMb / 1024).toFixed(0) : ''} onInput={(e) => upd({ capacityQuotaMb: Number((e.target as HTMLInputElement).value) * 1024 || undefined })} placeholder="如 10" /></label>
+          <label>上传超时（分钟） <input type="number" min={5} max={240} value={t.timeoutMin ?? 30} onInput={(e) => upd({ timeoutMin: Number((e.target as HTMLInputElement).value) })} /></label>
+        </div>
+        <label class="check-item">
+          <input type="checkbox" checked={t.allowUnencrypted ?? true} onChange={(e) => upd({ allowUnencrypted: (e.target as HTMLInputElement).checked })} /> 允许未加密备份（关闭则只收加密包，强烈建议敏感服务器关闭）
+        </label>
+        {testResult[t.id ?? 'form'] && <div class="banner-ok">{testResult[t.id ?? 'form']}</div>}
+        <div class="btn-row">
+          <button class="ghost" disabled={testing === 'form'} onClick={() => test(t)}>测试连接</button>
+          <button onClick={save}>保存</button>
+          <button class="ghost" onClick={() => setEditing(null)}>取消</button>
+        </div>
       </div>
-      <div class="card-last">
-        {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)} · {fmtSize(last.sizeBytes)}</> : <span class="muted">从未备份</span>}
+    )
+  }
+
+  return (
+    <div>
+      {msg && <div class="banner-ok">{msg}</div>}
+      <div class="toolbar">
+        <button onClick={() => setEditing({ enabled: true, keep: 7, timeoutMin: 30, allowUnencrypted: true })}>＋ 添加 WebDAV 目标</button>
       </div>
-      {last?.error && <div class="card-err">{last.error}</div>}
-      <div class="btn-row">
-        <button class="ghost sm" disabled={runningId === active.id} onClick={() => onRun(active.id)}>{runningId === active.id ? '备份中…' : '立即备份'}</button>
-        <button class="ghost sm" onClick={() => onStartEdit(active)}>编辑</button>
-        <button class="ghost sm" onClick={() => onRestore(active)}>还原/下载</button>
-        <button class="ghost sm danger" onClick={() => onRemove(active.id)}>删除</button>
-      </div>
+      {targets.map((t) => (
+        <div class="card wide" key={t.id}>
+          <div class="card-head">
+            <span class="name">{t.name}</span>
+            <span class={`badge ${t.hasPassword ? 'ok' : 'warn'}`}>{t.hasPassword ? '✓ 凭据已配置' : '⚠ 未配置凭据'}</span>
+            {!t.enabled && <span class="badge warn">禁用</span>}
+            {!t.allowUnencrypted && <span class="badge">仅加密</span>}
+          </div>
+          <div class="card-meta">{t.url} · 保留 {t.keep} 份{t.capacityQuotaMb ? ` · 配额 ${(t.capacityQuotaMb / 1024).toFixed(0)}GB` : ''} · 超时 {t.timeoutMin}min</div>
+          {testResult[t.id] && <div class="banner-ok">{testResult[t.id]}</div>}
+          <div class="btn-row">
+            <button class="ghost sm" disabled={testing === t.id} onClick={() => testSaved(t.id)}>{testing === t.id ? '测试中…' : '测试连接'}</button>
+            <button class="ghost sm" onClick={() => setEditing(t)}>编辑</button>
+            <button class="ghost sm danger" onClick={() => remove(t.id)}>删除</button>
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
 
-// ---- RestoreDialog ----
+// ---- Settings ----
+function Settings() {
+  const [msg, setMsg] = useState('')
+  const submit = async (e: Event) => {
+    e.preventDefault()
+    const form = new FormData(e.target as HTMLFormElement)
+    try {
+      await api('/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({ oldPassword: form.get('old'), newPassword: form.get('new') }),
+      })
+      setMsg('✅ 密码已修改，其他设备已登出')
+    } catch (ex) {
+      setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
+    }
+  }
+  return (
+    <div class="card wide">
+      <div class="card-head"><span class="name">修改管理员密码</span></div>
+      {msg && <div class="banner-ok">{msg}</div>}
+      <form class="cred-form" onSubmit={submit}>
+        <input name="old" type="password" placeholder="当前密码" required />
+        <input name="new" type="password" placeholder="新密码（≥8 位）" required minlength={8} />
+        <button type="submit">修改</button>
+      </form>
+      <div class="card-meta muted">修改后所有已登录设备强制登出（30 天记住设备）</div>
+    </div>
+  )
+}
+
+try {
+  render(<App />, document.getElementById('app') as HTMLElement)
+} catch (e) {
+  document.body.innerText = 'BOOT ERROR: ' + (e instanceof Error ? e.stack?.slice(0, 500) : String(e))
+}
+
+
+// ---- RestoreDialog（还原/下载） ----
 interface ArtifactInfo {
   runId: string
   artifactPath: string
@@ -661,170 +785,3 @@ function RestoreDialog({ profile, onClose }: { profile: Profile; onClose: () => 
     </div>
   )
 }
-
-// ---- Targets ----
-function Targets() {
-  const [targets, setTargets] = useState<Target[]>([])
-  const [editing, setEditing] = useState<Partial<Target> & { password?: string } | null>(null)
-  const [testing, setTesting] = useState<string | null>(null)
-  const [testResult, setTestResult] = useState<Record<string, string>>({})
-  const [msg, setMsg] = useState('')
-
-  const load = () => api<{ targets: Target[] }>('/api/targets').then((r) => setTargets(r.targets))
-  useEffect(() => {
-    load()
-  }, [])
-
-  const toggle = async (t: Target) => {
-    setTargets((s) => s.map((x) => (x.id === t.id ? { ...x, enabled: !x.enabled } : x)))
-    try {
-      await api(`/api/targets/${t.id}/toggle`, { method: 'POST' })
-    } catch {
-      await load()
-    }
-  }
-
-  const save = async () => {
-    if (!editing) return
-    setMsg('')
-    try {
-      await api('/api/targets', { method: 'POST', body: JSON.stringify(editing) })
-      setMsg('✅ 已保存')
-      setEditing(null)
-      await load()
-    } catch (ex) {
-      setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
-    }
-  }
-
-  const test = async (t: Partial<Target> & { password?: string }) => {
-    setTesting('form')
-    try {
-      const r = await api<{ ok: boolean; message: string }>('/api/targets/test', {
-        method: 'POST',
-        body: JSON.stringify({ url: t.url, username: t.username, password: t.password, targetId: t.id }),
-      })
-      setTestResult((s) => ({ ...s, [t.id ?? 'form']: `${r.ok ? '✅' : '❌'} ${r.message}` }))
-    } catch (ex) {
-      setTestResult((s) => ({ ...s, [t.id ?? 'form']: `❌ ${ex instanceof Error ? ex.message : String(ex)}` }))
-    } finally {
-      setTesting(null)
-    }
-  }
-
-  const testSaved = async (id: string) => {
-    setTesting(id)
-    try {
-      const r = await api<{ ok: boolean; message: string }>('/api/targets/test', { method: 'POST', body: JSON.stringify({ targetId: id }) })
-      setTestResult((s) => ({ ...s, [id]: `${r.ok ? '✅' : '❌'} ${r.message}` }))
-    } catch (ex) {
-      setTestResult((s) => ({ ...s, [id]: `❌ ${ex instanceof Error ? ex.message : String(ex)}` }))
-    } finally {
-      setTesting(null)
-    }
-  }
-
-  const remove = async (id: string) => {
-    if (!confirm('确认删除该 WebDAV 目标？绑定它的档案将不再推送。')) return
-    await api(`/api/targets/${id}`, { method: 'DELETE' })
-    await load()
-  }
-
-  if (editing) {
-    const t = editing
-    const upd = (patch: Partial<Target> & { password?: string }) => setEditing({ ...t, ...patch })
-    return (
-      <div class="card wide editor">
-        <div class="card-head">
-          <span class="name">{t.id ? `编辑：${t.name}` : '添加 WebDAV 目标'}</span>
-        </div>
-        <p class="muted">支持任意标准 WebDAV：Koofr、坚果云、InfiniCloud、群晖、Alist、Nextcloud…</p>
-        <div class="form-grid">
-          <label>名称 <input value={t.name ?? ''} onInput={(e) => upd({ name: (e.target as HTMLInputElement).value })} placeholder="如 Koofr 主力 / 群晖家用" /></label>
-          <label class="full">
-            WebDAV 地址 <input value={t.url ?? ''} onInput={(e) => upd({ url: (e.target as HTMLInputElement).value })} placeholder="https://app.koofr.net/dav/Koofr/autobackup" />
-          </label>
-          <label>用户名 <input value={t.username ?? ''} onInput={(e) => upd({ username: (e.target as HTMLInputElement).value })} /></label>
-          <label>密码 <input type="password" value={t.password ?? ''} onInput={(e) => upd({ password: (e.target as HTMLInputElement).value })} placeholder={t.hasPassword ? '••••••（留空保持不变）' : '应用专用密码'} /></label>
-          <label>保留份数（默认） <input type="number" min={3} max={365} value={t.keep ?? 7} onInput={(e) => upd({ keep: Number((e.target as HTMLInputElement).value) })} /></label>
-          <label>容量配额 GB（可选） <input type="number" min={0} value={t.capacityQuotaMb ? (t.capacityQuotaMb / 1024).toFixed(0) : ''} onInput={(e) => upd({ capacityQuotaMb: Number((e.target as HTMLInputElement).value) * 1024 || undefined })} placeholder="如 10" /></label>
-          <label>上传超时（分钟） <input type="number" min={5} max={240} value={t.timeoutMin ?? 30} onInput={(e) => upd({ timeoutMin: Number((e.target as HTMLInputElement).value) })} /></label>
-        </div>
-        <label class="check-item">
-          <Toggle checked={t.allowUnencrypted ?? true} onChange={(v) => upd({ allowUnencrypted: v })} /> 允许未加密备份（关闭则只收加密包）
-        </label>
-        {t.id && (
-          <label class="check-item">
-            <Toggle checked={t.enabled ?? true} onChange={(v) => upd({ enabled: v })} /> 启用此目标
-          </label>
-        )}
-        {testResult[t.id ?? 'form'] && <div class="banner-ok">{testResult[t.id ?? 'form']}</div>}
-        <div class="btn-row">
-          <button class="ghost" disabled={testing === 'form'} onClick={() => test(t)}>测试连接</button>
-          <button onClick={save}>保存</button>
-          <button class="ghost" onClick={() => setEditing(null)}>取消</button>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div>
-      {msg && <div class="banner-ok">{msg}</div>}
-      <div class="toolbar">
-        <button onClick={() => setEditing({ enabled: true, keep: 7, timeoutMin: 30, allowUnencrypted: true })}>＋ 添加 WebDAV 目标</button>
-      </div>
-      {targets.map((t) => (
-        <div class={`card wide ${t.enabled ? '' : 'card-off'}`} key={t.id}>
-          <div class="card-head">
-            <span class="name">{t.name}</span>
-            <span class={`badge ${t.hasPassword ? 'ok' : 'warn'}`}>{t.hasPassword ? '✓ 凭据已配置' : '⚠ 未配置凭据'}</span>
-            {!t.allowUnencrypted && <span class="badge">仅加密</span>}
-            <span style="margin-left:auto">
-              <Toggle checked={t.enabled} onChange={() => toggle(t)} />
-            </span>
-          </div>
-          <div class="card-meta">{t.url} · 保留 {t.keep} 份{t.capacityQuotaMb ? ` · 配额 ${(t.capacityQuotaMb / 1024).toFixed(0)}GB` : ''} · 超时 {t.timeoutMin}min</div>
-          {testResult[t.id] && <div class="banner-ok">{testResult[t.id]}</div>}
-          <div class="btn-row">
-            <button class="ghost sm" disabled={testing === t.id} onClick={() => testSaved(t.id)}>{testing === t.id ? '测试中…' : '测试连接'}</button>
-            <button class="ghost sm" onClick={() => setEditing(t)}>编辑</button>
-            <button class="ghost sm danger" onClick={() => remove(t.id)}>删除</button>
-          </div>
-        </div>
-      ))}
-    </div>
-  )
-}
-
-// ---- Settings ----
-function Settings() {
-  const [msg, setMsg] = useState('')
-  const submit = async (e: Event) => {
-    e.preventDefault()
-    const form = new FormData(e.target as HTMLFormElement)
-    try {
-      await api('/auth/change-password', {
-        method: 'POST',
-        body: JSON.stringify({ oldPassword: form.get('old'), newPassword: form.get('new') }),
-      })
-      setMsg('✅ 密码已修改，其他设备已登出')
-    } catch (ex) {
-      setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
-    }
-  }
-  return (
-    <div class="card wide">
-      <div class="card-head"><span class="name">修改管理员密码</span></div>
-      {msg && <div class="banner-ok">{msg}</div>}
-      <form class="cred-form" onSubmit={submit}>
-        <input name="old" type="password" placeholder="当前密码" required />
-        <input name="new" type="password" placeholder="新密码（≥8 位）" required minlength={8} />
-        <button type="submit">修改</button>
-      </form>
-      <div class="card-meta muted">修改后所有已登录设备强制登出（30 天记住设备）</div>
-    </div>
-  )
-}
-
-render(<App />, document.getElementById('app') as HTMLElement)
