@@ -229,6 +229,11 @@ export async function restoreProfile(
       case 'directory':
       case 'config': {
         if (profile.paths.length === 0) throw new RestoreError('档案缺少路径', profile.id)
+        // 声明了容器的档案：先停（配置读进内存的应用，不停容器还原会被内存态覆盖回去）
+        for (const c of profile.containers) {
+          await execFileAsync('docker', ['stop', c]).catch(() => {})
+          steps.push(`停止容器 ${c}`)
+        }
         // pre-restore 兜底：打包当前内容
         for (const p of profile.paths) {
           await cp(p, join(preRestoreDir, basename(p)), { recursive: true }).catch(() => {})
@@ -238,11 +243,26 @@ export async function restoreProfile(
         for (const p of profile.paths) {
           const root = basename(p)
           const unpacked = join(workDir, root)
-          await stat(unpacked)
+          const unpackedStat = await stat(unpacked).catch(() => undefined)
+          if (!unpackedStat) {
+            steps.push(`包内无 ${root}（备份时为空），跳过`)
+            continue
+          }
+          if (unpackedStat.isFile()) {
+            await mkdir(dirname(p), { recursive: true })
+            await copyFile(unpacked, p)
+            steps.push(`已还原文件 ${p}`)
+            continue
+          }
           const existing = await readdir(p).catch(() => [])
           for (const e of existing) await rm(join(p, e), { recursive: true, force: true })
           await cp(unpacked, p, { recursive: true })
           steps.push(`已还原 ${p}（${(await readdir(p)).length} 项）`)
+        }
+        // 起容器
+        for (const c of profile.containers) {
+          await execFileAsync('docker', ['start', c]).catch(() => {})
+          steps.push(`启动容器 ${c}（应用重新加载还原后的配置）`)
         }
         break
       }
@@ -334,6 +354,7 @@ async function restoreMultiPart(
         )
       } else {
         // directory/config：逐路径覆盖（清空原目录内容再拷入）
+        // 注：容器级停/起已在外面统一做过（restoreMultiPart 第 0 步）；这里只处理文件
         const paths = part.paths ?? []
         if (paths.length === 0) throw new RestoreError(`part ${part.key} 缺 paths`, profile.id)
         for (const p of paths) {
@@ -342,7 +363,19 @@ async function restoreMultiPart(
           backedUp.push(p)
           const root = basename(p)
           const unpacked = join(partDir, root)
-          await stat(unpacked)
+          // 包内该路径可能不存在（备份时是空目录/单文件 part）——跳过而非报错
+          const unpackedStat = await stat(unpacked).catch(() => undefined)
+          if (!unpackedStat) {
+            steps.push(`[${part.label}] 包内无 ${root}（备份时为空），跳过`)
+            continue
+          }
+          if (unpackedStat.isFile()) {
+            // 单文件 part：直接覆盖目标文件
+            await mkdir(dirname(p), { recursive: true })
+            await copyFile(unpacked, p)
+            steps.push(`[${part.label}] 已还原文件 ${p}`)
+            continue
+          }
           const existing = await readdir(p).catch(() => [])
           for (const e of existing) await rm(join(p, e), { recursive: true, force: true })
           await cp(unpacked, p, { recursive: true })
