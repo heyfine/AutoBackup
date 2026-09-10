@@ -25,7 +25,11 @@ restore-work/
 admin-password.txt
 cookies.txt
 
+# 本地文稿（不进任何远程仓库）
+promo-article.md
+
 # 内部开发文档（不公开）
 AGENTS.md
+docs/
 logs/
 scripts/main-*.tsx
