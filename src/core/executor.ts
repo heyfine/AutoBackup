@@ -190,7 +190,7 @@ async function snapshotDirectory(profile: AppProfile, stagingDir: string): Promi
 export { tmpdir }
 
 /** part 专用 AppProfile 视图（复用单类型执行器） */
-function partToProfile(profile: AppProfile, part: ProfilePart, idx: number): AppProfile {
+function partToProfile(profile: AppProfile, part: ProfilePart): AppProfile {
   return {
     ...profile,
     id: profile.id,
@@ -223,7 +223,7 @@ async function snapshotMultiPart(profile: AppProfile, secrets: (ref: string) => 
     const key = partKey(part, i)
     const partDir = join(partsRoot, key)
     await mkdir(partDir, { recursive: true })
-    const sub = partToProfile(profile, part, i)
+    const sub = partToProfile(profile, part)
     const snap = await takeSnapshotSingle(sub, secrets, partDir)
     details.push(`[${part.label}] ${snap.detail}`)
     partResults.push({ key, kind: part.kind, label: part.label })

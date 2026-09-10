@@ -2,7 +2,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { stat, readdir } from 'node:fs/promises'
 import { join, basename } from 'node:path'
-import type { ProfilePart, ProfileKind } from '../types.js'
+import type { ProfilePart } from '../types.js'
 
 const execFileAsync = promisify(execFile)
 

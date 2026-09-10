@@ -18,3 +18,9 @@ autobackup.db*
 test-dir_*.tar.gz
 test-dir_*.manifest.json
 *.tar.gz.age
+
+# 临时产物与敏感文件
+pre-restore/
+restore-work/
+admin-password.txt
+cookies.txt
