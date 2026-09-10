@@ -66,7 +66,9 @@ interface Target {
 
 // ---- API helpers ----
 async function api<T>(path: string, opts?: RequestInit): Promise<T> {
-  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts })
+  const headers: Record<string, string> = {}
+  if (opts?.body) headers['Content-Type'] = 'application/json'
+  const res = await fetch(path, { ...opts, headers })
   if (res.status === 401 && !path.startsWith('/auth/')) {
     window.location.hash = '#/login'
     throw new Error('unauthorized')
@@ -273,6 +275,15 @@ function Profiles() {
   const [scanning, setScanning] = useState(false)
   const [scanInfo, setScanInfo] = useState('')
   const [restoring, setRestoring] = useState<Profile | null>(null)
+
+  const toggle = async (p: Profile) => {
+    try {
+      await api(`/api/profiles/${p.id}/toggle`, { method: 'POST' })
+      await load()
+    } catch {
+      /* 轮询会刷新 */
+    }
+  }
 
   const scan = async () => {
     setScanning(true)
