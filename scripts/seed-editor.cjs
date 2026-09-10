@@ -1,0 +1,1 @@
+const D=require('better-sqlite3');const d=new D('autobackup.db');d.prepare("DELETE FROM apps WHERE id LIKE 'vw-%'").run();console.log('cleaned');d.close();process.exit(0);

@@ -334,11 +334,23 @@ function Profiles() {
   if (editing) {
     const p = editing
     const upd = (patch: Partial<Profile>) => setEditing({ ...p, ...patch })
+    // 同应用的其他档案（数据/配置等）——切 Tab 直接切换编辑对象
+    const siblings = profiles.filter((x) => x.id !== p.id && appBaseName(x.name) === appBaseName(p.name))
     return (
       <div class="card wide editor">
         <div class="card-head">
-          <span class="name">{isNew ? '新建备份档案' : `编辑：${p.name}`}</span>
+          <span class="name">{isNew ? '新建备份档案' : `编辑：${appBaseName(p.name)}`}</span>
         </div>
+        {!isNew && siblings.length > 0 && (
+          <div class="tab-row editor-tabs">
+            <button class={`tab on`} onClick={() => {}}>{p.name.slice(appBaseName(p.name).length).replace(/^[\s·-]+/, '') || p.kind}</button>
+            {siblings.map((s) => (
+              <button key={s.id} class="tab" onClick={() => { setEditing({ ...s, recentRuns: s.recentRuns ?? [] }); setMsg('') }}>
+                {s.name.slice(appBaseName(s.name).length).replace(/^[\s·-]+/, '') || s.kind}
+              </button>
+            ))}
+          </div>
+        )}
         {msg && <div class="banner-ok">{msg}</div>}
         <div class="form-grid">
           <label>名称 <input value={p.name} onInput={(e) => upd({ name: (e.target as HTMLInputElement).value })} /></label>
