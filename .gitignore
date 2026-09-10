@@ -24,3 +24,8 @@ pre-restore/
 restore-work/
 admin-password.txt
 cookies.txt
+
+# 内部开发文档（不公开）
+AGENTS.md
+logs/
+scripts/main-*.tsx
