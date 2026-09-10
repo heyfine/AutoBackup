@@ -516,19 +516,32 @@ function Profiles() {
               })}
             </div>
           )}
-          {(p.parts ?? []).length > 0 && (
-            <div class="parts-summary">
-              <strong>已选 {(p.parts ?? []).length} 项：</strong>
-              {(p.parts ?? []).map((x, i) => (
-                <span class="sel-part" key={i} title={partIdent(x)}>
-                  {x.label || kindLabel(x.kind)}{x.sizeBytes != null ? `(${fmtSize(x.sizeBytes)})` : ''}
-                  {(x.paths ?? []).length > 1 ? ` 等${x.paths!.length}项` : ''}
-                </span>
-              ))}
-              {(p.parts ?? []).length >= 2 && '——备份时合并为一个压缩包，还原时整体自动恢复（数据库自动停/起容器）'}
-              <button class="ghost sm" type="button" onClick={() => upd({ parts: [] })}>清空</button>
-            </div>
-          )}
+          {(p.parts ?? []).length > 0 && (() => {
+            // 展示粒度与勾选行一致：多路径 part 展开为单项徽章，计数 = 内容项数（非 part 对象数）
+            const expanded: { label: string; title: string }[] = []
+            for (const x of p.parts ?? []) {
+              const paths = x.paths ?? []
+              if (paths.length > 1) {
+                for (const pp of paths) {
+                  expanded.push({ label: `${x.label || kindLabel(x.kind)} ${pp.split('/').pop() ?? pp}`, title: pp })
+                }
+              } else if (paths.length === 1) {
+                expanded.push({ label: `${x.label || kindLabel(x.kind)}`, title: paths[0] ?? '' })
+              } else {
+                expanded.push({ label: `${x.label || kindLabel(x.kind)}${x.database ? ` ${x.database}` : ''}`, title: x.dbPath ?? x.container ?? '' })
+              }
+            }
+            return (
+              <div class="parts-summary">
+                <strong>已选 {expanded.length} 项：</strong>
+                {expanded.map((e2, i) => (
+                  <span class="sel-part" key={i} title={e2.title}>{e2.label}</span>
+                ))}
+                {expanded.length >= 2 && '——备份时合并为一个压缩包，还原时整体自动恢复（数据库自动停/起容器）'}
+                <button class="ghost sm" type="button" onClick={() => upd({ parts: [] })}>清空</button>
+              </div>
+            )
+          })()}
         </div>
         {(p.kind === 'directory' || p.kind === 'config') && (
           <label class="full">
