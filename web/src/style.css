@@ -213,3 +213,31 @@ input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   .shell header { padding: 10px 14px; gap: 10px; }
   .shell nav { gap: 10px; }
 }
+
+
+/* ---- 多类型备份内容选择（v2） ---- */
+.parts-section {
+  border: 1px solid var(--border, #e2e2e2);
+  border-radius: 10px;
+  padding: 12px;
+  margin-top: 4px;
+}
+.parts-list { display: flex; flex-direction: column; gap: 6px; }
+.part-item {
+  display: flex; align-items: center; gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #eee);
+  border-radius: 8px;
+  cursor: pointer;
+  background: var(--card, #fff);
+}
+.part-item:hover { border-color: var(--accent, #4a90d9); }
+.part-item input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent, #34c759); }
+.part-label { font-weight: 500; }
+.part-kind { font-size: 12px; padding: 1px 6px; border: 1px solid var(--border, #ddd); border-radius: 6px; }
+.part-size { font-size: 12px; color: var(--muted-fg, #888); min-width: 60px; text-align: right; }
+.part-src { font-size: 11px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.parts-summary {
+  margin-top: 8px; font-size: 12px; color: var(--muted-fg, #666);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}

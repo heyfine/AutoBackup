@@ -3,7 +3,7 @@ import { promisify } from 'node:util'
 import { mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import type { AppProfile } from '../types.js'
+import type { AppProfile, ProfilePart, ProfileKind } from '../types.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -35,6 +35,10 @@ export class ExecutorError extends Error {
 export async function takeSnapshot(profile: AppProfile, secrets: (ref: string) => string, homeDir: string): Promise<SnapshotResult> {
   const stagingDir = await mkdtemp(join(homeDir, 'snapshot-'))
   try {
+    // 多类型模式：逐 part 快照到 parts/<key>/，packer 合并打包
+    if (profile.parts && profile.parts.length > 0) {
+      return await snapshotMultiPart(profile, secrets, stagingDir)
+    }
     switch (profile.kind) {
       case 'sqlite':
         return await snapshotSqlite(profile, stagingDir)
@@ -184,3 +188,73 @@ async function snapshotDirectory(profile: AppProfile, stagingDir: string): Promi
 }
 
 export { tmpdir }
+
+/** part 专用 AppProfile 视图（复用单类型执行器） */
+function partToProfile(profile: AppProfile, part: ProfilePart, idx: number): AppProfile {
+  return {
+    ...profile,
+    id: profile.id,
+    kind: part.kind,
+    paths: part.paths ?? [],
+    containers: part.container ? [part.container] : [],
+    dbPath: part.dbPath,
+    database: part.database,
+    dbUser: part.dbUser,
+    dumpTool: part.dumpTool,
+    dumpArgs: part.dumpArgs,
+    passwordRef: part.passwordRef,
+    containerWorkdir: part.containerWorkdir,
+  }
+}
+
+/**
+ * 多类型快照：每个 part 用对应一致性执行器，产物统一放 staging/parts/<key>/。
+ * 单个 part 失败 → 整体失败（备份的完整性优先，避免「以为备好了其实缺一半」）。
+ */
+async function snapshotMultiPart(profile: AppProfile, secrets: (ref: string) => string, stagingDir: string): Promise<SnapshotResult> {
+  const partsRoot = join(stagingDir, 'parts')
+  const { mkdir } = await import('node:fs/promises')
+  const details: string[] = []
+  const partResults: { key: string; kind: ProfileKind; label: string }[] = []
+  const partList = profile.parts ?? []
+  for (let i = 0; i < partList.length; i++) {
+    const part = partList[i]
+    if (!part) continue
+    const key = partKey(part, i)
+    const partDir = join(partsRoot, key)
+    await mkdir(partDir, { recursive: true })
+    const sub = partToProfile(profile, part, i)
+    const snap = await takeSnapshotSingle(sub, secrets, partDir)
+    details.push(`[${part.label}] ${snap.detail}`)
+    partResults.push({ key, kind: part.kind, label: part.label })
+  }
+  return {
+    stagingDir,
+    artifactName: 'parts/',
+    detail: `多类型打包 ${partResults.length} 项：${details.join('；')}`,
+  }
+}
+
+/** 单类型快照（供 multipart 复用；不建 temp staging，直接用指定目录） */
+async function takeSnapshotSingle(profile: AppProfile, secrets: (ref: string) => string, stagingDir: string): Promise<SnapshotResult> {
+  switch (profile.kind) {
+    case 'sqlite':
+      return await snapshotSqlite(profile, stagingDir)
+    case 'mariadb':
+      return await snapshotMariadb(profile, secrets, stagingDir)
+    case 'postgres':
+      return await snapshotPostgres(profile, stagingDir)
+    case 'directory':
+    case 'config':
+      return await snapshotDirectory(profile, stagingDir)
+    default: {
+      const never: never = profile.kind
+      throw new ExecutorError(`unknown profile kind: ${never as string}`, profile.id)
+    }
+  }
+}
+
+function partKey(part: ProfilePart, idx: number): string {
+  const n = (part.label ?? '').replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]+/g, '-').slice(0, 20)
+  return `${idx}_${part.kind}_${n || 'part'}`
+}

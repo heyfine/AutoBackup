@@ -180,6 +180,7 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
         id: body.id ?? `p_${Date.now().toString(36)}_${randomUUID().slice(0, 6)}`,
         name: body.name ?? '未命名档案',
         kind: body.kind ?? 'directory',
+        parts: body.parts,
         paths: body.paths ?? [],
         containers: body.containers ?? [],
         dbPath: body.dbPath,
@@ -208,7 +209,30 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
       await reply.code(400).send({ error: 'interval 频率的 hours 必须在 1-168' })
       return
     }
-    if (profile.kind === 'directory' && profile.paths.length === 0) {
+    // 多类型模式校验：至少勾选一项
+    if (Array.isArray(profile.parts)) {
+      if (profile.parts.length === 0) {
+        await reply.code(400).send({ error: '多类型模式至少要勾选一项备份内容' })
+        return
+      }
+      for (const part of profile.parts) {
+        if ((part.kind === 'directory' || part.kind === 'config') && !(part.paths && part.paths.length > 0)) {
+          await reply.code(400).send({ error: `子项「${part.label}」缺少路径` })
+          return
+        }
+        if (part.kind === 'sqlite' && !part.dbPath) {
+          await reply.code(400).send({ error: `子项「${part.label}」缺少数据库文件路径` })
+          return
+        }
+        if ((part.kind === 'mariadb' || part.kind === 'postgres') && !part.container) {
+          await reply.code(400).send({ error: `子项「${part.label}」缺少容器名` })
+          return
+        }
+      }
+      // 校验通过后按第一个 part 的 kind 作为主 kind（兼容旧 UI 展示与调度）
+      const firstPart = profile.parts[0]
+      if (firstPart) profile.kind = firstPart.kind
+    } else if (profile.kind === 'directory' && profile.paths.length === 0) {
       await reply.code(400).send({ error: '目录类档案至少要有一个路径' })
       return
     }
@@ -277,6 +301,17 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
       return result
     } catch (err) {
       return { drafts: [], scanned: 0, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  /** 类型自动识别（编辑器多选数据源）：按容器/路径探测可备份类型 + 大小 */
+  app.post('/api/profiles/inspect', async (req) => {
+    const body = (req.body ?? {}) as { containers?: string[]; dbPath?: string; paths?: string[]; name?: string }
+    const { inspectProfileParts } = await import('./core/inspector.js')
+    try {
+      return await inspectProfileParts(body)
+    } catch (err) {
+      return { parts: [], note: `探测失败：${err instanceof Error ? err.message : String(err)}` }
     }
   })
 

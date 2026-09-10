@@ -39,7 +39,28 @@ export async function pack(
 
   // 1) 收集要打包的内容（目录类用 profile.paths，其他类用 stagingDir 里的产物）
   const sources: { absPath: string; arcname: string }[] = []
-  if (profile.kind === 'directory' || profile.kind === 'config') {
+  if (profile.parts && profile.parts.length > 0) {
+    // 多类型合并打包：staging/parts/<key>/ 整目录入包（part key = 包内顶层目录 = 还原路由单元）
+    // 目录/配置 part 的真实文件按其 paths 追加进包（snapshotDirectory 只写 sources.json 线索）
+    for (let pi = 0; pi < profile.parts.length; pi++) {
+      const part = profile.parts[pi]
+      if (!part) continue
+      if ((part.kind === 'directory' || part.kind === 'config') && part.paths) {
+        const key = `${pi}_${part.kind}_${(part.label ?? '').replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]+/g, '-').slice(0, 20) || 'part'}`
+        for (const p of part.paths) {
+          const s = await stat(p).catch(() => undefined)
+          if (!s) continue
+          // 真实文件放进 parts/<key>/<basename>/（还原路由按此位置取）
+          if (s.isDirectory()) {
+            await collectDir(p, `parts/${key}/${basename(p)}`, sources)
+          } else {
+            sources.push({ absPath: p, arcname: `parts/${key}/${basename(p)}` })
+          }
+        }
+      }
+    }
+    await collectDir(join(stagingDir, 'parts'), 'parts', sources)
+  } else if (profile.kind === 'directory' || profile.kind === 'config') {
     for (const p of profile.paths) {
       const s = await stat(p)
       if (s.isDirectory()) {
@@ -66,12 +87,30 @@ export async function pack(
   // 4) 校验和与 manifest
   const size = (await stat(finalPath)).size
   const sha256 = await fileSha256(finalPath)
+  // 多类型：manifest.parts 记录每个 part 的包内位置与还原路由（整体还原依据）
+  const manifestParts = profile.parts?.map((part, i) => {
+    const key = `${i}_${part.kind}_${(part.label ?? '').replace(/[^a-zA-Z0-9\u4e00-\u9fa5_-]+/g, '-').slice(0, 20) || 'part'}`
+    return {
+      key,
+      kind: part.kind,
+      label: part.label,
+      root: `parts/${key}`,
+      restore: (part.kind === 'sqlite' ? 'sqlite' : part.kind === 'mariadb' ? 'mariadb' : part.kind === 'postgres' ? 'postgres' : 'directory') as 'sqlite' | 'directory' | 'mariadb' | 'postgres',
+      dbPath: part.dbPath,
+      database: part.database,
+      dbUser: part.dbUser,
+      container: part.container,
+      dumpTool: part.dumpTool,
+      paths: part.paths,
+    }
+  })
   const manifest: Manifest = {
     manifest_version: 1,
     tool_version: TOOL_VERSION,
     profile_id: profile.id,
     profile_name: profile.name,
     kind: profile.kind,
+    parts: manifestParts,
     snapshot_at: opts.snapshotAt,
     created_at: new Date().toISOString(),
     compression: 'gzip',
@@ -129,6 +168,9 @@ export async function fileSha256(path: string): Promise<string> {
 }
 
 function restoreHint(p: AppProfile): string {
+  if (p.parts && p.parts.length > 0) {
+    return `整体还原：${p.parts.map((x) => x.label).join(' + ')}（按 manifest.parts 自动路由：sqlite 停容器→替换→起容器，目录类直接覆盖）`
+  }
   switch (p.kind) {
     case 'sqlite':
       return '停容器 → 解包替换 db（删除 -wal/-shm）→ 起容器 → /alive 探活'

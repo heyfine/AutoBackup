@@ -11,11 +11,35 @@ export type ScheduleSpec =
   | { mode: 'daily'; at: string } // "HH:mm"
   | { mode: 'interval'; hours: number } // 1-168
 
+/** 多类型备份子项（v2）：一个档案可勾选多种内容合并打包 */
+export interface ProfilePart {
+  /** 子项类型（决定一致性执行器与还原方式） */
+  kind: ProfileKind
+  /** 显示名（如「数据库」「配置文件」） */
+  label: string
+  /** 目录/配置类：宿主路径 */
+  paths?: string[]
+  /** 数据库类：容器名 */
+  container?: string
+  /** sqlite：db 文件路径 */
+  dbPath?: string
+  database?: string
+  dbUser?: string
+  dumpTool?: string
+  dumpArgs?: string
+  passwordRef?: string
+  containerWorkdir?: string
+  /** 探测到的字节大小（UI 展示；执行时刷新） */
+  sizeBytes?: number
+}
+
 /** 备份档案（一个可备份单元） */
 export interface AppProfile {
   id: string
   name: string
   kind: ProfileKind
+  /** 多类型备份（v2）：勾选的备份内容列表；为空时回退到单类型字段（旧档案兼容） */
+  parts?: ProfilePart[]
   /** 目录类：要打包的宿主路径 */
   paths: string[]
   /** 数据库类：容器名（docker exec 用），目录类可选（stop_service 时逐个 stop/start） */
@@ -106,6 +130,8 @@ export interface Manifest {
   profile_id: string
   profile_name: string
   kind: ProfileKind
+  /** 多类型打包：包内各 part 的位置与还原方式（整体还原路由依据） */
+  parts?: { key: string; kind: ProfileKind; label: string; root: string; restore: 'sqlite' | 'directory' | 'mariadb' | 'postgres'; dbPath?: string; database?: string; dbUser?: string; container?: string; dumpTool?: string; paths?: string[] }[]
   /** 快照完成时刻（数据截止点，唯一可信） */
   snapshot_at: string
   created_at: string

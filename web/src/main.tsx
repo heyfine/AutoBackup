@@ -18,6 +18,27 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   )
 }
 
+interface ProfilePart {
+  kind: 'sqlite' | 'mariadb' | 'postgres' | 'directory' | 'config'
+  label: string
+  paths?: string[]
+  container?: string
+  dbPath?: string
+  database?: string
+  dbUser?: string
+  dumpTool?: string
+  dumpArgs?: string
+  passwordRef?: string
+  containerWorkdir?: string
+  sizeBytes?: number
+}
+
+interface DetectedPart extends ProfilePart {
+  source: string
+  unavailable?: string
+  available: boolean
+}
+
 interface RunPublic {
   id: string
   profileId: string
@@ -41,6 +62,7 @@ interface Profile {
   id: string
   name: string
   kind: string
+  parts?: ProfilePart[]
   paths: string[]
   encrypt: boolean
   enabled: boolean
@@ -75,6 +97,20 @@ async function api<T>(path: string, opts?: RequestInit): Promise<T> {
   }
   if (!res.ok) throw new Error((await res.json().catch(() => ({ error: res.statusText }))).error)
   return res.json() as Promise<T>
+}
+
+function partIdent(x: ProfilePart): string {
+  return `${x.kind}|${x.dbPath ?? ''}|${x.database ?? ''}|${x.container ?? ''}|${(x.paths ?? []).join(',')}`
+}
+
+function kindLabel(k: string): string {
+  switch (k) {
+    case 'sqlite': return 'SQLite'
+    case 'mariadb': return 'MariaDB'
+    case 'postgres': return 'PostgreSQL'
+    case 'config': return '配置'
+    default: return '目录'
+  }
 }
 
 function fmtSize(n?: number): string {
@@ -317,6 +353,43 @@ function Profiles() {
   const [editing, setEditing] = useState<Profile | null>(null)
   const [isNew, setIsNew] = useState(false)
   const [msg, setMsg] = useState('')
+  const [detectedParts, setDetectedParts] = useState<DetectedPart[]>([])
+  const [inspecting, setInspecting] = useState(false)
+  const [inspectNote, setInspectNote] = useState('')
+
+  const inspectParts = async () => {
+    if (!editing) return
+    setInspecting(true)
+    setInspectNote('')
+    try {
+      // 识别线索 = 档案字段 + 已勾选 parts 的路径/容器（parts 里的线索最准）
+      const parts = editing.parts ?? []
+      const allPaths = [...(editing.paths ?? []), ...parts.flatMap((x) => x.paths ?? [])]
+      const allContainers = [...(editing.containers ?? []), ...parts.map((x) => x.container).filter(Boolean)] as string[]
+      const dbPaths = [editing.dbPath, ...parts.map((x) => x.dbPath).filter(Boolean)] as (string | undefined)[]
+      const r = await api<{ parts: DetectedPart[]; note: string }>('/api/profiles/inspect', {
+        method: 'POST',
+        body: JSON.stringify({
+          containers: [...new Set(allContainers)],
+          dbPath: dbPaths.find(Boolean),
+          dbPaths: dbPaths.filter(Boolean),
+          paths: [...new Set(allPaths)],
+          name: editing.name,
+        }),
+      })
+      setDetectedParts(r.parts ?? [])
+      setInspectNote(r.note ?? '')
+      // 若档案还没有勾选，自动全选可用项（体验：识别即可用，可手动取消）
+      if ((editing.parts ?? []).length === 0) {
+        const auto = (r.parts ?? []).filter((x) => x.available).map(({ source, available, unavailable, ...part }) => part)
+        if (auto.length > 0) upd({ parts: auto })
+      }
+    } catch (ex) {
+      setInspectNote(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
+    } finally {
+      setInspecting(false)
+    }
+  }
 
   const load = async () => {
     const [pr, tg] = await Promise.all([
@@ -384,16 +457,53 @@ function Profiles() {
         {msg && <div class="banner-ok">{msg}</div>}
         <div class="form-grid">
           <label>名称 <input value={p.name} onInput={(e) => upd({ name: (e.target as HTMLInputElement).value })} /></label>
-          <label>
-            类型
-            <select value={p.kind} onChange={(e) => upd({ kind: (e.target as HTMLSelectElement).value })}>
-              <option value="directory">目录</option>
-              <option value="config">配置目录</option>
-              <option value="sqlite">SQLite 数据库</option>
-              <option value="mariadb">MariaDB / MySQL</option>
-              <option value="postgres">PostgreSQL</option>
-            </select>
-          </label>
+        </div>
+
+        <div class="full parts-section">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+            <strong>备份内容（可多选，合并为一个压缩包）</strong>
+            <button class="ghost sm" type="button" disabled={inspecting} onClick={() => inspectParts()}>
+              {inspecting ? '识别中…' : '🔍 自动识别可备份类型'}
+            </button>
+            {inspectNote && <span class="muted" style="font-size:12px">{inspectNote}</span>}
+          </div>
+          {detectedParts.length > 0 && (
+            <div class="parts-list">
+              {detectedParts.map((dp, i) => {
+                const checked = (p.parts ?? []).some((x) => partIdent(x) === partIdent(dp))
+                return (
+                  <label class="part-item" key={i}>
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={(e) => {
+                        const on = (e.target as HTMLInputElement).checked
+                        const cur = p.parts ?? []
+                        if (on) {
+                          const { source, available, unavailable, ...part } = dp
+                          upd({ parts: [...cur, part] })
+                        } else {
+                          upd({ parts: cur.filter((x) => partIdent(x) !== partIdent(dp)) })
+                        }
+                      }}
+                    />
+                    <span class="part-label">{dp.label}</span>
+                    <span class="muted part-kind">{kindLabel(dp.kind)}</span>
+                    <span class="part-size">{dp.sizeBytes != null ? fmtSize(dp.sizeBytes) : dp.available ? '—' : ''}</span>
+                    <span class="muted part-src" title={dp.source}>{dp.source}</span>
+                    {!dp.available && <span class="badge warn">{dp.unavailable ?? '不可用'}</span>}
+                  </label>
+                )
+              })}
+            </div>
+          )}
+          {(p.parts ?? []).length > 0 && (
+            <div class="parts-summary">
+              已选 {(p.parts ?? []).length} 项
+              {(p.parts ?? []).length >= 2 && '：备份时合并为一个压缩包，还原时整体自动恢复（数据库自动停/起容器）'}
+              <button class="ghost sm" type="button" onClick={() => upd({ parts: [] })}>清空</button>
+            </div>
+          )}
         </div>
         {(p.kind === 'directory' || p.kind === 'config') && (
           <label class="full">
@@ -512,7 +622,7 @@ function Profiles() {
                   <Toggle checked={p.enabled} onChange={() => toggle(p)} />
                 </span>
               </div>
-              <div class="card-meta">{p.kind} · {scheduleLabel(p.schedule)} · 保留 {p.keep} 份 · 目标 {p.targetIds.length === 0 ? '全部' : p.targetIds.length}</div>
+              <div class="card-meta">{p.parts && p.parts.length > 0 ? p.parts.map((x) => kindLabel(x.kind)).join('+') : kindLabel(p.kind)} · {scheduleLabel(p.schedule)} · 保留 {p.keep} 份 · 目标 {p.targetIds.length === 0 ? '全部' : p.targetIds.length}</div>
               <div class="card-last">
                 {last ? <><span class={`dot ${cls}`} /> {fmtTime(last.startedAt)}</> : <span class="muted">从未备份</span>}
               </div>
