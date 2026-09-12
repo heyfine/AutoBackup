@@ -395,9 +395,7 @@ function Dashboard() {
 function Profiles() {
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [targets, setTargets] = useState<Target[]>([])
-  const [drafts, setDrafts] = useState<DetectedDraft[]>([])
-  const [scanning, setScanning] = useState(false)
-  const [scanInfo, setScanInfo] = useState('')
+  const [autoScanning, setAutoScanning] = useState(false)
   const [restoring, setRestoring] = useState<Profile | null>(null)
 
   const toggle = async (p: Profile) => {
@@ -409,33 +407,24 @@ function Profiles() {
     }
   }
 
-  const scan = async () => {
-    setScanning(true)
-    setScanInfo('')
+  /** 即时执行一轮自动入档扫描（与 6h 定时同逻辑）：新应用→建档且开关默认关 */
+  async function scanAndAdd() {
+    setAutoScanning(true)
     try {
-      const r = await api<{ drafts: DetectedDraft[]; scanned: number; error?: string }>('/api/detect', { method: 'POST' })
-      if (r.error) {
-        setScanInfo(`⚠️ ${r.error}`)
-        setDrafts([])
-      } else {
-        setDrafts(r.drafts)
-        setScanInfo(`扫描了 ${r.scanned} 个容器，发现 ${r.drafts.length} 个新应用`)
-      }
-    } catch (ex) {
-      setScanInfo(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
-    } finally {
-      setScanning(false)
-    }
-  }
-
-  const adopt = async (d: DetectedDraft) => {
-    try {
-      const r = await api<{ profile: Profile }>('/api/profiles/adopt', { method: 'POST', body: JSON.stringify({ draft: d }) })
-      setDrafts((s) => s.filter((x) => x.containerName !== d.containerName))
-      setMsg(`✅ 已添加「${r.profile.name}」（默认停用，请编辑确认后打开开关）`)
+      const r = await api<{ added: string[]; removed: string[]; error?: string }>('/api/detect/scan-now', { method: 'POST' })
+      if (r.error) setMsg(`⚠️ 扫描失败：${r.error}`)
+      else if (r.added.length || r.removed.length)
+        setMsg(
+          `✅ 自动入档 ${r.added.length} 个档案（备份开关默认关闭，核对后自行开启）${
+            r.removed.length ? `，清理 ${r.removed.length} 个容器已消失的过期档案` : ''
+          }`,
+        )
+      else setMsg('✅ 扫描完成：没有新应用（已有档案未被改动）')
       await load()
     } catch (ex) {
       setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
+    } finally {
+      setAutoScanning(false)
     }
   }
   const [editing, setEditing] = useState<Profile | null>(null)
@@ -704,24 +693,21 @@ function Profiles() {
       {msg && <div class="banner-ok">{msg}</div>}
       <div class="toolbar">
         <button onClick={() => startEdit(null)}>＋ 新建档案</button>
-        <button class="ghost" disabled={scanning} onClick={scan}>{scanning ? '扫描中…' : '🔍 扫描新应用'}</button>
-        {scanInfo && <span class="muted" style="margin-left:10px">{scanInfo}</span>}
+        <button class="ghost" disabled={autoScanning} onClick={() => void scanAndAdd()}>
+          {autoScanning ? '扫描中…' : '🔍 立即扫描入档'}
+        </button>
       </div>
 
       {restoring && <RestoreDialog profile={restoring} onClose={() => { setRestoring(null); load() }} />}
-      {drafts.length > 0 && (
-        <div class="card wide detect-banner">
-          <div class="card-head"><span class="name">🆕 检测到 {drafts.length} 个新应用</span></div>
-          <p class="muted">采纳后默认<strong>停用</strong>——请编辑确认细节后再打开开关。</p>
-          {drafts.map((d) => (
-            <div class="detect-item" key={d.containerName}>
-              <div>
-                <strong>{d.suggestedProfile?.name ?? d.containerName}</strong>
-                <span class="muted"> · 容器 {d.containerName} · {d.image}</span>
-              </div>
-              <button class="ghost sm" onClick={() => adopt(d)}>采纳为档案</button>
-            </div>
-          ))}
+      {profiles.filter((p) => p.id.startsWith('auto_') && !p.enabled).length > 0 && (
+        <div class="card wide detect-banner" style="margin-bottom:12px">
+          <div class="card-head">
+            <span class="name">🆕 {profiles.filter((p) => p.id.startsWith('auto_') && !p.enabled).length} 个自动发现的新应用待开启</span>
+          </div>
+          <p class="muted">
+            系统每 6 小时自动扫描容器：新应用已建为档案（下方带「自动发现」徽标、开关为关，<strong>不会执行任何备份</strong>）。
+            点开核对内容，确认无误后打开开关即纳入保护。
+          </p>
         </div>
       )}
       <div class="cards">
@@ -732,6 +718,7 @@ function Profiles() {
             <div class="card" key={p.id}>
               <div class="card-head">
                 <span class="name">{p.name}</span>
+                {p.id.startsWith('auto_') && <span class="badge warn">自动发现</span>}
                 {p.encrypt && <span class="badge">🔒</span>}
                 <span style="margin-left:auto">
                   <Toggle checked={p.enabled} onChange={() => toggle(p)} />

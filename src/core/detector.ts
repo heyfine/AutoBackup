@@ -100,8 +100,26 @@ export interface DetectResult {
   scanned: number
 }
 
+/** 当前运行中的容器名全集（草稿僵尸判定用） */
+export async function listRunningContainers(): Promise<Set<string>> {
+  const { stdout } = await execFileAsync('docker', ['ps', '--format', '{{.Names}}'])
+  return new Set(stdout.trim().split('\n').filter(Boolean))
+}
+
+/** 宿主机路径是否与既有档案路径重叠（互为前缀即视为重叠，防同一数据目录重复出草稿） */
+function pathOverlaps(candidate: string, existingPaths: string[]): boolean {
+  const clean = candidate.replace(/\/+$/, '')
+  return existingPaths.some((ep) => {
+    const base = ep.replace(/\/+$/, '')
+    return base === clean || clean.startsWith(base + '/') || base.startsWith(clean + '/')
+  })
+}
+
 /** 扫描 docker 容器，产出「新应用」草稿（排除已有档案覆盖的容器） */
-export async function detectContainers(existingContainers: string[]): Promise<DetectResult> {
+export async function detectContainers(
+  existingContainers: string[],
+  existingPaths: string[] = [],
+): Promise<DetectResult> {
   const { stdout } = await execFileAsync('docker', ['ps', '--format', '{{.Names}}\t{{.Image}}'])
   const lines = stdout.trim().split('\n').filter(Boolean)
   const drafts: DetectedDraft[] = []
@@ -127,7 +145,8 @@ export async function detectContainers(existingContainers: string[]): Promise<De
       continue
     }
 
-    // 指纹匹配
+    // 指纹匹配；无命中 → 通用兜底（有宿主挂载的未知容器也值得入档待查，开关默认关由用户决定）
+    let matched = false
     for (const fp of FINGERPRINTS) {
       if (fp.match.test(image)) {
         const suggested = fp.suggest({ name, image, mounts }, mounts)
@@ -141,7 +160,33 @@ export async function detectContainers(existingContainers: string[]): Promise<De
           },
           confidence: 'high',
         })
-        break // 每容器只出一条建议
+        matched = true
+        break
+      }
+    }
+    if (!matched) {
+      const hostPaths = [
+        ...new Set(
+          mounts
+            .filter((m) => (m.type === 'bind' || m.type === 'volume') && m.source)
+            .map((m) => m.source),
+        ),
+      ].filter((p) => !existingPaths.some((ep) => pathOverlaps(p, [ep])))
+      if (hostPaths.length > 0) {
+        drafts.push({
+          containerName: name,
+          image,
+          mounts: mounts.map((m) => ({ type: m.type as 'bind' | 'volume', source: m.source, dest: m.dest })),
+          suggestedProfile: {
+            name: `${name} 数据目录`,
+            kind: 'directory',
+            paths: hostPaths,
+            containers: [name],
+            encrypt: false,
+            consistency: 'best_effort',
+          },
+          confidence: 'low',
+        })
       }
     }
   }

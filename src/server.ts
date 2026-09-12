@@ -389,7 +389,7 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     return { profile }
   })
 
-  /** 新应用检测（docker 容器 → 草稿建议） */
+  /** 新应用检测（docker 容器 → 草稿建议，UI 编辑器按需，不落库） */
   app.post('/api/detect', async () => {
     const { detectContainers } = await import('./core/detector.js')
     const profiles = store.listProfiles({ includeDrafts: true })
@@ -399,6 +399,16 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
       return result
     } catch (err) {
       return { drafts: [], scanned: 0, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  /** 手动执行一轮「自动入档」扫描（与 6h 定时同逻辑）：新应用→档案 enabled=false */
+  app.post('/api/detect/scan-now', async () => {
+    const { scanAndRegister } = await import('./core/auto-detect.js')
+    try {
+      return await scanAndRegister(store, notify)
+    } catch (err) {
+      return { added: [], removed: [], error: err instanceof Error ? err.message : String(err) }
     }
   })
 

@@ -10,6 +10,7 @@ VPS 上的自动备份中心：**自动检测应用 → 一致性快照 → 合�
 
 - **多类型合并备份（v2）**：一个备份档案可同时勾选多种内容——SQLite 数据库 / MariaDB / PostgreSQL / 数据目录 / 配置文件——合并为一个压缩包，还原时一次到位
 - **类型自动识别**：打开编辑器即按容器镜像、挂载点、路径探测机器上可备份的项，并显示大小
+- **新应用自动入档**：每 6 小时扫描容器——新装应用自动出现在档案列表（「自动发现」徽标、**备份开关默认关闭**），并经 Bark/邮件通知你核对；核对无误打开开关即纳入保护，已卸载应用的未启用档案自动清理
 - **一致性快照**：SQLite 走官方 backup API 在线热备并跑 integrity_check；MariaDB `--single-transaction`；PostgreSQL `pg_dump -Fc`；数据库凭据经 `--defaults-extra-file` 注入，不进命令行
 - **加密**：敏感档案 age 加密，备份包落到第三方网盘也不可读；manifest 清单保持明文，供远端浏览与 sha256 校验
 - **多 WebDAV 目标**：同时推多家网盘（Koofr、InfiniCloud 等 WebDAV 服务均可），每家独立保留份数与容量水位预警
@@ -111,6 +112,7 @@ systemctl daemon-reload && systemctl enable --now autobackup
 node dist/src/index.js run <profileId>   # 手动备份一个档案
 node dist/src/index.js run --all         # 手动跑全部启用档案
 node dist/src/index.js status            # 查看档案与最近运行状态
+node dist/src/index.js scan              # 立即执行一轮新应用扫描入档
 node dist/src/index.js serve             # 常驻模式（调度器 + Web API）
 ```
 

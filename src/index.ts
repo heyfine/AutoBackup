@@ -110,11 +110,21 @@ async function main(): Promise<void> {
       console.log(`retention done: deleted=${result.deleted} kept=${result.kept}`)
       break
     }
+    case 'scan': {
+      const { scanAndRegister } = await import('./core/auto-detect.js')
+      const out = await scanAndRegister(ctx.store, ctx.hub)
+      if (out.added.length) console.log(`已入档（开关默认关）：${out.added.join('、')}`)
+      if (out.removed.length) console.log(`清理过期自动档案：${out.removed.join('、')}`)
+      if (!out.added.length && !out.removed.length) console.log('扫描完成：没有新应用（已有档案未被改动）')
+      break
+    }
     case 'serve': {
       await ctx.pipeline.recoverStaleRuns()
       ctx.scheduler.start()
       const { startTempCleanupTimer } = await import('./core/temp-cleanup.js')
       const stopCleanup = startTempCleanupTimer(ctx.homeDir)
+      const { startAutoDetect } = await import('./core/auto-detect.js')
+      const stopAutoDetect = startAutoDetect(ctx.store, ctx.hub)
       const { startApi } = await import('./server.js')
       const api = await startApi({
         store: ctx.store,
@@ -129,6 +139,7 @@ async function main(): Promise<void> {
         console.log('\nshutting down...')
         ctx.scheduler.stop()
         stopCleanup()
+        stopAutoDetect()
         void api.stop()
         ctx.store.close()
         process.exit(0)
@@ -140,7 +151,7 @@ async function main(): Promise<void> {
       break
     }
     default:
-      console.error(`unknown command: ${command} (run|status|retention|serve)`)
+      console.error(`unknown command: ${command} (run|status|retention|scan|serve)`)
       process.exitCode = 2
   }
 
