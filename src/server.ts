@@ -8,6 +8,7 @@ import type { Store } from './store/db.js'
 import type { Pipeline } from './core/pipeline.js'
 import type { Scheduler } from './core/scheduler.js'
 import type { Secrets } from './core/secrets.js'
+import type { BarkNotifier } from './core/notifier.js'
 import type { AppProfile, BackupTarget, DetectedDraft, RunRecord } from './types.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -22,6 +23,7 @@ export interface ApiDeps {
   scheduler: Scheduler
   secrets: Secrets
   secretsPath: string
+  notify: BarkNotifier
   port: number
 }
 
@@ -94,7 +96,7 @@ export class AdminAuth {
 }
 
 export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: AdminAuth; stop: () => Promise<void> }> {
-  const { store, scheduler, secrets, secretsPath, port } = deps
+  const { store, scheduler, secrets, secretsPath, notify, port } = deps
   const auth = new AdminAuth(process.env.AUTOBACKUP_HOME ?? process.cwd())
   const initialPassword = auth.ensurePassword()
   if (initialPassword) {
@@ -442,6 +444,25 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     renameSync(tmp, secretsPath)
     ;(secrets as unknown as { values: Map<string, string> }).values.set(key, value)
   }
+
+  // ---- 告警通知（Bark）----
+  /** 只回是否已配置；Bark URL 含设备密钥，按凭据处理，永不回显 */
+  app.get('/api/notify/status', async () => ({ barkConfigured: secrets.has('BARK_URL') }))
+
+  app.post('/api/notify/bark', async (req) => {
+    const { url } = (req.body ?? {}) as { url?: string }
+    upsertSecret('BARK_URL', url?.trim() ?? '')
+    return { barkConfigured: secrets.has('BARK_URL') }
+  })
+
+  /** 发一条测试推送，验证告警通道真实可达（失败必告警的闭环入口） */
+  app.post('/api/notify/test', async () => {
+    if (!secrets.has('BARK_URL')) {
+      return { sent: false, error: '未配置 BARK_URL' }
+    }
+    const sent = await notify.send('test', '✅ 测试通知：AutoBackup 告警通道已连通')
+    return { sent, error: sent ? undefined : 'Bark 投递失败（检查网络/密钥/服务状态）' }
+  })
 
   // ---- targets 凭据快捷更新（兼容 M3 早期 UI）----
   app.post('/api/targets/:id/credentials', async (req, reply) => {

@@ -28,6 +28,7 @@ function parseArgs(argv: string[]): Cli {
 async function bootstrap(): Promise<{
   store: Store
   secrets: Secrets
+  notifier: BarkNotifier
   pipeline: Pipeline
   scheduler: Scheduler
   homeDir: string
@@ -40,10 +41,10 @@ async function bootstrap(): Promise<{
   const store = new Store(join(homeDir, 'autobackup.db'))
   const secretsPath = resolveSecretsPath(homeDir)
   const secrets = new Secrets(secretsPath)
-  const notifier = new BarkNotifier(secrets.getOptional('BARK_URL'))
+  const notifier = new BarkNotifier(() => secrets.getOptional('BARK_URL'))
   const pipeline = new Pipeline({ store, secrets, homeDir, notify: notifier, toolVersion: TOOL_VERSION })
   const scheduler = new Scheduler(store, pipeline)
-  return { store, secrets, pipeline, scheduler, homeDir, secretsPath }
+  return { store, secrets, notifier, pipeline, scheduler, homeDir, secretsPath }
 }
 
 async function main(): Promise<void> {
@@ -116,6 +117,7 @@ async function main(): Promise<void> {
         scheduler: ctx.scheduler,
         secrets: ctx.secrets,
         secretsPath: ctx.secretsPath,
+        notify: ctx.notifier,
         port: Number(process.env.AUTOBACKUP_PORT ?? 8199),
       })
       const shutdown = (): void => {

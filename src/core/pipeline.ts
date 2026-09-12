@@ -9,7 +9,7 @@ import { pack } from './packer.js'
 import { putFile, listFiles, deleteFile } from './webdav.js'
 
 export interface NotifySink {
-  send(event: string, message: string): Promise<void>
+  send(event: string, message: string): Promise<unknown>
 }
 
 export interface PipelineDeps {

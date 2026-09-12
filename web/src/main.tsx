@@ -800,6 +800,87 @@ function Targets() {
 }
 
 // ---- Settings ----
+function BarkCard() {
+  const [configured, setConfigured] = useState<boolean | null>(null)
+  const [url, setUrl] = useState('')
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function refresh() {
+    try {
+      const r = await api<{ barkConfigured: boolean }>('/api/notify/status')
+      setConfigured(r.barkConfigured)
+    } catch {
+      setConfigured(false)
+    }
+  }
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  async function saveBark() {
+    if (!url.trim()) return
+    setBusy(true)
+    try {
+      await api('/api/notify/bark', { method: 'POST', body: JSON.stringify({ url: url.trim() }) })
+      setUrl('')
+      setNotice({ ok: true, text: '已保存，免重启即时生效——建议马上点「发测试通知」验证通道' })
+      await refresh()
+    } catch (ex) {
+      setNotice({ ok: false, text: `保存失败：${ex instanceof Error ? ex.message : String(ex)}` })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function testBark() {
+    setBusy(true)
+    try {
+      const r = await api<{ sent: boolean; error?: string }>('/api/notify/test', { method: 'POST' })
+      setNotice(r.sent ? { ok: true, text: '已推送 ✅ 请查看手机 Bark' } : { ok: false, text: r.error ?? '推送失败' })
+    } catch (ex) {
+      setNotice({ ok: false, text: `推送失败：${ex instanceof Error ? ex.message : String(ex)}` })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div class="card wide">
+      <div class="card-head">
+        <span class="name">备份失败告警（Bark）</span>
+        {configured === null ? (
+          <span class="badge">加载中…</span>
+        ) : configured ? (
+          <span class="badge ok">已配置</span>
+        ) : (
+          <span class="badge warn">未配置 —— 失败不会推送</span>
+        )}
+      </div>
+      <div class="card-meta muted">
+        任何一次备份失败都会推送到手机（成功静默不打扰；连续 3 次失败自动升级为持续响铃）。
+        安装 iOS App <a href="https://apps.apple.com/app/bark/id1403753865">Bark</a> 获取推送 URL 后填入即可。
+      </div>
+      {notice && <div class={notice.ok ? 'banner-ok' : 'banner-err'}>{notice.text}</div>}
+      <div class="cred-form">
+        <input
+          type="password"
+          value={url}
+          onInput={(e) => setUrl(e.currentTarget.value)}
+          placeholder={configured ? '输入新 URL 覆盖保存（当前值不回显）' : 'https://api.day.app/your-key'}
+        />
+        <button disabled={!url.trim() || busy} onClick={() => void saveBark()}>
+          保存
+        </button>
+        <button disabled={busy || !configured} onClick={() => void testBark()}>
+          发测试通知
+        </button>
+      </div>
+      <div class="card-meta muted">URL 含设备密钥，保存后永不回显；留空保存等于关闭告警。</div>
+    </div>
+  )
+}
+
 function Settings() {
   const [msg, setMsg] = useState('')
   const submit = async (e: Event) => {
@@ -816,16 +897,19 @@ function Settings() {
     }
   }
   return (
-    <div class="card wide">
-      <div class="card-head"><span class="name">修改管理员密码</span></div>
-      {msg && <div class="banner-ok">{msg}</div>}
-      <form class="cred-form" onSubmit={submit}>
-        <input name="old" type="password" placeholder="当前密码" required />
-        <input name="new" type="password" placeholder="新密码（≥8 位）" required minlength={8} />
-        <button type="submit">修改</button>
-      </form>
-      <div class="card-meta muted">修改后所有已登录设备强制登出（30 天记住设备）</div>
-    </div>
+    <>
+      <div class="card wide">
+        <div class="card-head"><span class="name">修改管理员密码</span></div>
+        {msg && <div class="banner-ok">{msg}</div>}
+        <form class="cred-form" onSubmit={submit}>
+          <input name="old" type="password" placeholder="当前密码" required />
+          <input name="new" type="password" placeholder="新密码（≥8 位）" required minlength={8} />
+          <button type="submit">修改</button>
+        </form>
+        <div class="card-meta muted">修改后所有已登录设备强制登出（30 天记住设备）</div>
+      </div>
+      <BarkCard />
+    </>
   )
 }
 
