@@ -38,9 +38,30 @@ export class AdminAuth {
   private sessions = new Map<string, Session>()
   private loginAttempts: { count: number; resetAt: number } = { count: 0, resetAt: 0 }
   readonly passwordFile: string
+  readonly usernameFile: string
 
   constructor(private readonly homeDir: string) {
     this.passwordFile = join(homeDir, 'admin-password.txt')
+    this.usernameFile = join(homeDir, 'admin-username.txt')
+  }
+
+  /** 是否已自定义用户名（未自定义时登录用默认 admin，兼容纯密码时代存量部署） */
+  hasCustomUsername(): boolean {
+    return existsSync(this.usernameFile)
+  }
+
+  getUsername(): string {
+    if (!this.hasCustomUsername()) return 'admin'
+    try {
+      return readFileSync(this.usernameFile, 'utf8').trim() || 'admin'
+    } catch {
+      return 'admin'
+    }
+  }
+
+  /** 用户名规则：2-32 字符，禁止路径/控制字符；允许中文 */
+  static isValidUsername(name: string): boolean {
+    return name.length >= 2 && name.length <= 32 && !/[\\/:*?"<>|\x00-\x1f\s]/.test(name)
   }
 
   /** 管理员密码是否已创建（UI 据此决定显示「登录」还是「首次创建」） */
@@ -48,27 +69,52 @@ export class AdminAuth {
     return existsSync(this.passwordFile)
   }
 
+  private static atomicWrite(file: string, content: string): void {
+    const tmp = `${file}.tmp`
+    writeFileSync(tmp, content, { mode: 0o600 })
+    renameSync(tmp, file)
+  }
+
   /**
    * 首启自建：仅当从未创建过密码时可写——成功一次后窗口永久关闭。
-   * 原子写（评审 D5：tempfile+rename）。
+   * 用户名与密码一并创建（用户名文件独立存放，密码文件保持「manually 放置即登录」老路径兼容）。
    */
-  setupPassword(newPwd: string): boolean {
-    if (this.isConfigured() || newPwd.length < 8) return false
-    const tmp = `${this.passwordFile}.tmp`
-    writeFileSync(tmp, newPwd, { mode: 0o600 })
-    renameSync(tmp, this.passwordFile)
+  setupAccount(username: string, newPwd: string): boolean {
+    if (this.isConfigured()) return false
+    const name = username.trim()
+    if (!AdminAuth.isValidUsername(name) || newPwd.length < 8) return false
+    AdminAuth.atomicWrite(this.usernameFile, name)
+    AdminAuth.atomicWrite(this.passwordFile, newPwd)
     return true
   }
 
-  verify(input: string): boolean {
-    // 登录限频：10 分钟窗口 5 次
+  /** 登录后可随时改用户名（用户名非机密，不参与「一次性窗口」） */
+  changeUsername(name: string): string | null {
+    const trimmed = name.trim()
+    if (!AdminAuth.isValidUsername(trimmed)) return null
+    AdminAuth.atomicWrite(this.usernameFile, trimmed)
+    return trimmed
+  }
+
+  private static safeEqual(a: string, b: string): boolean {
+    const x = Buffer.from(a)
+    const y = Buffer.from(b)
+    return x.length === y.length && timingSafeEqual(x, y)
+  }
+
+  private verifyPassword(pwd: string): boolean {
+    if (!existsSync(this.passwordFile)) return false
+    return AdminAuth.safeEqual(pwd, readFileSync(this.passwordFile, 'utf8').trim())
+  }
+
+  /** 登录校验：用户名+密码联合判定，合并计入限频（防用户名爆破）；不回显哪个错 */
+  login(inputUser: string, inputPwd: string): boolean {
     const now = Date.now()
     if (now < this.loginAttempts.resetAt && this.loginAttempts.count >= 5) return false
-    if (!existsSync(this.passwordFile)) return false // 未初始化：拒绝一切登录（旧版此处 readFileSync 抛 500）
-    const stored = readFileSync(this.passwordFile, 'utf8').trim()
-    const a = Buffer.from(input)
-    const b = Buffer.from(stored)
-    const ok = a.length === b.length && timingSafeEqual(a, b)
+    const ok =
+      this.isConfigured() &&
+      AdminAuth.safeEqual(inputUser.trim(), this.getUsername()) &&
+      this.verifyPassword(inputPwd)
     if (now >= this.loginAttempts.resetAt) {
       this.loginAttempts = { count: 0, resetAt: now + 10 * 60 * 1000 }
     }
@@ -77,13 +123,10 @@ export class AdminAuth {
   }
 
   changePassword(oldPwd: string, newPwd: string): boolean {
-    if (!this.verify(oldPwd)) return false
+    if (!this.verifyPassword(oldPwd)) return false
     if (newPwd.length < 8) return false
-    // 原子写（评审 D5：tempfile+rename）
-    const tmp = `${this.passwordFile}.tmp`
-    writeFileSync(tmp, newPwd, { mode: 0o600 })
-    renameSync(tmp, this.passwordFile)
-    this.sessions.clear() // 全端登出
+    AdminAuth.atomicWrite(this.passwordFile, newPwd)
+    this.sessions.clear() // 全端登出（改密不重置限频计数：登录限频是防爆破而非防自己）
     return true
   }
 
@@ -131,16 +174,20 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
 
   /** 一次性自建：仅未初始化时可调用，成功即关闭入口并直接登录 */
   app.post('/auth/setup', async (req, reply) => {
-    const { password } = (req.body ?? {}) as { password?: string }
+    const { username, password } = (req.body ?? {}) as { username?: string; password?: string }
     if (auth.isConfigured()) {
       await reply.code(403).send({ error: '管理员已初始化，创建入口已关闭' })
+      return
+    }
+    if (!username || !AdminAuth.isValidUsername(username.trim())) {
+      await reply.code(400).send({ error: '用户名需 2-32 字符（不含空格及特殊字符）' })
       return
     }
     if (!password || password.length < 8) {
       await reply.code(400).send({ error: '密码至少 8 位' })
       return
     }
-    if (!auth.setupPassword(password)) {
+    if (!auth.setupAccount(username, password)) {
       await reply.code(409).send({ error: '创建失败（可能已被初始化），请刷新重试' })
       return
     }
@@ -153,9 +200,9 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
   })
 
   app.post('/auth/login', async (req, reply) => {
-    const { password } = (req.body ?? {}) as { password?: string }
-    if (!password || !auth.verify(password)) {
-      await reply.code(401).send({ error: '密码错误' })
+    const { username, password } = (req.body ?? {}) as { username?: string; password?: string }
+    if (!password || !auth.login(username ?? '', password)) {
+      await reply.code(401).send({ error: '用户名或密码错误' })
       return
     }
     const token = auth.createSession()
@@ -183,6 +230,19 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
       return
     }
     return { ok: true }
+  })
+
+  // ---- 账号（登录后路由，受 session 保护；用户名非机密可回显） ----
+  app.get('/api/account', async () => ({ username: auth.getUsername(), customUsername: auth.hasCustomUsername() }))
+
+  app.post('/api/account/username', async (req, reply) => {
+    const { username } = (req.body ?? {}) as { username?: string }
+    const saved = username ? auth.changeUsername(username) : null
+    if (!saved) {
+      await reply.code(400).send({ error: '用户名需 2-32 字符（不含空格及特殊字符）' })
+      return
+    }
+    return { username: saved }
   })
 
   app.get('/health', async () => ({ ok: true, version: '0.1.0' }))

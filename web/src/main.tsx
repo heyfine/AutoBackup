@@ -169,6 +169,7 @@ function AppInner() {
 // ---- Login（含首启自建） ----
 function Login() {
   const [phase, setPhase] = useState<'loading' | 'login' | 'setup'>('loading')
+  const [user, setUser] = useState('')
   const [pwd, setPwd] = useState('')
   const [confirm, setConfirm] = useState('')
   const [err, setErr] = useState('')
@@ -189,7 +190,7 @@ function Login() {
     setBusy(true)
     setErr('')
     try {
-      await api('/auth/login', { method: 'POST', body: JSON.stringify({ password: pwd }) })
+      await api('/auth/login', { method: 'POST', body: JSON.stringify({ username: user, password: pwd }) })
       enterDashboard()
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex))
@@ -201,6 +202,10 @@ function Login() {
   async function submitSetup(e: Event) {
     e.preventDefault()
     setErr('')
+    if (user.trim().length < 2) {
+      setErr('用户名至少 2 个字符')
+      return
+    }
     if (pwd.length < 8) {
       setErr('密码至少 8 位')
       return
@@ -211,7 +216,7 @@ function Login() {
     }
     setBusy(true)
     try {
-      await api('/auth/setup', { method: 'POST', body: JSON.stringify({ password: pwd }) })
+      await api('/auth/setup', { method: 'POST', body: JSON.stringify({ username: user.trim(), password: pwd }) })
       enterDashboard()
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex))
@@ -232,19 +237,28 @@ function Login() {
     <div class="login-wrap">
       <form class="login-card" onSubmit={settingUp ? submitSetup : submitLogin}>
         <h1>🔐 AutoBackup</h1>
-        <p class="muted">{settingUp ? '初始化 · 创建管理员密码' : '备份中心 · 单管理员'}</p>
+        <p class="muted">{settingUp ? '初始化 · 创建管理员账号' : '备份中心 · 单管理员'}</p>
+        <input
+          type="text"
+          placeholder={settingUp ? '用户名（自己定，2-32 字符）' : '用户名（未自定义过则是 admin）'}
+          value={user}
+          autocomplete="username"
+          onInput={(e) => setUser((e.target as HTMLInputElement).value)}
+          autofocus
+        />
         <input
           type="password"
-          placeholder={settingUp ? '设置管理员密码（≥8 位）' : '管理员密码'}
+          placeholder={settingUp ? '设置管理员密码（≥8 位）' : '密码'}
           value={pwd}
+          autocomplete={settingUp ? 'new-password' : 'current-password'}
           onInput={(e) => setPwd((e.target as HTMLInputElement).value)}
-          autofocus
         />
         {settingUp && (
           <input
             type="password"
-            placeholder="再次输入确认"
+            placeholder="再次输入密码确认"
             value={confirm}
+            autocomplete="new-password"
             onInput={(e) => setConfirm((e.target as HTMLInputElement).value)}
           />
         )}
@@ -252,7 +266,7 @@ function Login() {
         <button type="submit" disabled={busy}>{busy ? '…' : settingUp ? '创建并进入' : '登录'}</button>
         {settingUp && (
           <p class="muted" style="font-size:12px;margin:0">
-            这是唯一一次创建机会：保存后入口永久关闭，此后只能凭密码登录；密码丢失需登录服务器重建。
+            这是唯一一次创建机会：保存后入口永久关闭，此后只能凭用户名+密码登录（用户名之后可在设置页改，密码需登录才能改）。
           </p>
         )}
       </form>
@@ -863,6 +877,69 @@ function Targets() {
 }
 
 // ---- Settings ----
+function AccountCard() {
+  const [username, setUsername] = useState<string | null>(null)
+  const [custom, setCustom] = useState(false)
+  const [name, setName] = useState('')
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function refresh() {
+    try {
+      const r = await api<{ username: string; customUsername: boolean }>('/api/account')
+      setUsername(r.username)
+      setCustom(r.customUsername)
+    } catch {
+      setUsername(null)
+    }
+  }
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  async function save() {
+    if (!name.trim()) return
+    setBusy(true)
+    try {
+      const r = await api<{ username: string }>('/api/account/username', {
+        method: 'POST',
+        body: JSON.stringify({ username: name.trim() }),
+      })
+      setName('')
+      setNotice({ ok: true, text: `用户名已改为「${r.username}」，下次登录起生效（当前会话不受影响）` })
+      await refresh()
+    } catch (ex) {
+      setNotice({ ok: false, text: ex instanceof Error ? ex.message : String(ex) })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div class="card wide">
+      <div class="card-head">
+        <span class="name">管理员账号</span>
+        {username !== null && <span class={custom ? 'badge ok' : 'badge warn'}>{custom ? '已自定义' : '默认 admin'}</span>}
+      </div>
+      <div class="card-meta muted">
+        当前用户名：<b>{username ?? '…'}</b>。用户名可在登录页直接输入修改；密码请在下方修改。
+      </div>
+      {notice && <div class={notice.ok ? 'banner-ok' : 'banner-err'}>{notice.text}</div>}
+      <div class="cred-form">
+        <input
+          type="text"
+          value={name}
+          placeholder="新用户名（2-32 字符，支持中文）"
+          onInput={(e) => setName(e.currentTarget.value)}
+        />
+        <button disabled={!name.trim() || busy} onClick={() => void save()}>
+          修改用户名
+        </button>
+      </div>
+    </div>
+  )
+}
+
 function BarkCard() {
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [url, setUrl] = useState('')
@@ -961,6 +1038,7 @@ function Settings() {
   }
   return (
     <>
+      <AccountCard />
       <div class="card wide">
         <div class="card-head"><span class="name">修改管理员密码</span></div>
         {msg && <div class="banner-ok">{msg}</div>}
