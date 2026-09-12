@@ -166,32 +166,95 @@ function AppInner() {
   return <Shell route={route} />
 }
 
-// ---- Login ----
+// ---- Login（含首启自建） ----
 function Login() {
+  const [phase, setPhase] = useState<'loading' | 'login' | 'setup'>('loading')
   const [pwd, setPwd] = useState('')
+  const [confirm, setConfirm] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
-  const submit = async (e: Event) => {
+
+  useEffect(() => {
+    api<{ configured: boolean }>('/auth/status')
+      .then((r) => setPhase(r.configured ? 'login' : 'setup'))
+      .catch(() => setPhase('login'))
+  }, [])
+
+  function enterDashboard() {
+    window.location.hash = '#/dashboard'
+  }
+
+  async function submitLogin(e: Event) {
     e.preventDefault()
     setBusy(true)
     setErr('')
     try {
       await api('/auth/login', { method: 'POST', body: JSON.stringify({ password: pwd }) })
-      window.location.hash = '#/dashboard'
+      enterDashboard()
     } catch (ex) {
       setErr(ex instanceof Error ? ex.message : String(ex))
     } finally {
       setBusy(false)
     }
   }
+
+  async function submitSetup(e: Event) {
+    e.preventDefault()
+    setErr('')
+    if (pwd.length < 8) {
+      setErr('密码至少 8 位')
+      return
+    }
+    if (pwd !== confirm) {
+      setErr('两次输入的密码不一致')
+      return
+    }
+    setBusy(true)
+    try {
+      await api('/auth/setup', { method: 'POST', body: JSON.stringify({ password: pwd }) })
+      enterDashboard()
+    } catch (ex) {
+      setErr(ex instanceof Error ? ex.message : String(ex))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (phase === 'loading') {
+    return (
+      <div class="login-wrap">
+        <div class="login-card"><h1>🔐 AutoBackup</h1></div>
+      </div>
+    )
+  }
+  const settingUp = phase === 'setup'
   return (
     <div class="login-wrap">
-      <form class="login-card" onSubmit={submit}>
+      <form class="login-card" onSubmit={settingUp ? submitSetup : submitLogin}>
         <h1>🔐 AutoBackup</h1>
-        <p class="muted">备份中心 · 单管理员</p>
-        <input type="password" placeholder="管理员密码" value={pwd} onInput={(e) => setPwd((e.target as HTMLInputElement).value)} autofocus />
+        <p class="muted">{settingUp ? '初始化 · 创建管理员密码' : '备份中心 · 单管理员'}</p>
+        <input
+          type="password"
+          placeholder={settingUp ? '设置管理员密码（≥8 位）' : '管理员密码'}
+          value={pwd}
+          onInput={(e) => setPwd((e.target as HTMLInputElement).value)}
+          autofocus
+        />
+        {settingUp && (
+          <input
+            type="password"
+            placeholder="再次输入确认"
+            value={confirm}
+            onInput={(e) => setConfirm((e.target as HTMLInputElement).value)}
+          />
+        )}
         {err && <div class="err">{err}</div>}
-        <button type="submit" disabled={busy}>{busy ? '…' : '登录'}</button>
+        <button type="submit" disabled={busy}>{busy ? '…' : settingUp ? '创建并进入' : '登录'}</button>
+        {settingUp && (
+          <p class="muted" style="font-size:12px;margin:0">
+            这是唯一一次创建机会：保存后入口永久关闭，此后只能凭密码登录；密码丢失需登录服务器重建。
+          </p>
+        )}
       </form>
     </div>
   )

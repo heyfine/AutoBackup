@@ -43,18 +43,28 @@ export class AdminAuth {
     this.passwordFile = join(homeDir, 'admin-password.txt')
   }
 
-  /** 首启生成随机密码；返回明文（仅此一次可读，打印到日志） */
-  ensurePassword(): string | null {
-    if (existsSync(this.passwordFile)) return null
-    const pwd = randomBytes(9).toString('base64url')
-    writeFileSync(this.passwordFile, pwd, { mode: 0o600 })
-    return pwd
+  /** 管理员密码是否已创建（UI 据此决定显示「登录」还是「首次创建」） */
+  isConfigured(): boolean {
+    return existsSync(this.passwordFile)
+  }
+
+  /**
+   * 首启自建：仅当从未创建过密码时可写——成功一次后窗口永久关闭。
+   * 原子写（评审 D5：tempfile+rename）。
+   */
+  setupPassword(newPwd: string): boolean {
+    if (this.isConfigured() || newPwd.length < 8) return false
+    const tmp = `${this.passwordFile}.tmp`
+    writeFileSync(tmp, newPwd, { mode: 0o600 })
+    renameSync(tmp, this.passwordFile)
+    return true
   }
 
   verify(input: string): boolean {
     // 登录限频：10 分钟窗口 5 次
     const now = Date.now()
     if (now < this.loginAttempts.resetAt && this.loginAttempts.count >= 5) return false
+    if (!existsSync(this.passwordFile)) return false // 未初始化：拒绝一切登录（旧版此处 readFileSync 抛 500）
     const stored = readFileSync(this.passwordFile, 'utf8').trim()
     const a = Buffer.from(input)
     const b = Buffer.from(stored)
@@ -98,9 +108,8 @@ export class AdminAuth {
 export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: AdminAuth; stop: () => Promise<void> }> {
   const { store, scheduler, secrets, secretsPath, notify, port } = deps
   const auth = new AdminAuth(process.env.AUTOBACKUP_HOME ?? process.cwd())
-  const initialPassword = auth.ensurePassword()
-  if (initialPassword) {
-    console.log(`[autobackup] 初始管理员密码（仅显示一次，请立即登录修改）: ${initialPassword}`)
+  if (!auth.isConfigured()) {
+    console.log('[autobackup] 管理员尚未初始化：打开 Web 控制台即可创建管理员密码（一次性窗口，创建后关闭）')
   }
 
   const app = Fastify({ logger: false, bodyLimit: 1024 * 1024 })
@@ -117,6 +126,32 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
   })
 
   // ---- auth ----
+  /** 首启状态：UI 据此显示「创建管理员密码」或「登录」；不回显任何凭据 */
+  app.get('/auth/status', async () => ({ configured: auth.isConfigured() }))
+
+  /** 一次性自建：仅未初始化时可调用，成功即关闭入口并直接登录 */
+  app.post('/auth/setup', async (req, reply) => {
+    const { password } = (req.body ?? {}) as { password?: string }
+    if (auth.isConfigured()) {
+      await reply.code(403).send({ error: '管理员已初始化，创建入口已关闭' })
+      return
+    }
+    if (!password || password.length < 8) {
+      await reply.code(400).send({ error: '密码至少 8 位' })
+      return
+    }
+    if (!auth.setupPassword(password)) {
+      await reply.code(409).send({ error: '创建失败（可能已被初始化），请刷新重试' })
+      return
+    }
+    const token = auth.createSession()
+    reply.header(
+      'Set-Cookie',
+      `ab_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_TTL_MS / 1000}`,
+    )
+    return { ok: true }
+  })
+
   app.post('/auth/login', async (req, reply) => {
     const { password } = (req.body ?? {}) as { password?: string }
     if (!password || !auth.verify(password)) {

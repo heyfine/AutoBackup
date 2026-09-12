@@ -65,11 +65,11 @@ AGE_RECIPIENT=age1xxxxxxxxxxxxxxxxxxxx
 BARK_URL=https://api.day.app/yourkey
 ```
 
-### 2. 设置管理员密码
+### 2. 创建管理员密码
 
-```bash
-echo "你的强密码" > admin-password.txt && chmod 600 admin-password.txt
-```
+启动服务后首次打开 Web 控制台，会直接看到**「创建管理员密码」**界面——自己设置（≥8 位）即完成初始化，**创建后该入口永久关闭**，此后只能凭密码登录。
+
+> 老手也可预先在运行目录放置 `admin-password.txt`（`chmod 600`），页面则直接进入登录。
 
 ### 3. 启动常驻服务
 
@@ -127,7 +127,7 @@ WebDAV / age / Bark 凭据统一放 `secrets.env` 文件（0600），见上文�
 
 ## 安全模型
 
-- 管理端单管理员，密码存 `admin-password.txt`（0600，不入库）
+- 管理端单管理员；密码首启在网页自建（一次性创建窗口，建成即关），存 `admin-password.txt`（0600，不入库、永不回显）
 - WebDAV / Bark / age 密钥集中 `secrets.env`（0600，原子写），不进 git、不走命令行
 - 数据库凭据经 `--defaults-extra-file` 注入，不出现在进程列表
 - 敏感备份包 age 加密后落网盘，manifest 明文仅供校验
