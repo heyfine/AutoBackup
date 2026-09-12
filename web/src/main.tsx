@@ -1135,7 +1135,7 @@ function EmailCard() {
       <div class="form-grid">
         <label>
           SMTP 服务器
-          <input value={host} onInput={(e) => setHost(e.currentTarget.value)} placeholder="smtp.qq.com" />
+          <input value={host} onInput={(e) => setHost(e.currentTarget.value)} placeholder="smtp.qq.com（裸域名，不要 http:// 前缀）" />
         </label>
         <label>
           端口

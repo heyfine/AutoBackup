@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AlertHub, BarkNotifier, EmailNotifier, emailConfigFromSecrets, type EmailConfig } from './notifier.js'
+import { AlertHub, BarkNotifier, EmailNotifier, emailConfigFromSecrets, normalizeSmtpHost, type EmailConfig } from './notifier.js'
 import type { Secrets } from './secrets.js'
 
 /**
@@ -151,6 +151,28 @@ describe('EmailNotifier（注入 fake transport）', () => {
     })
     await expect(n.send('test', 'x', 'active')).resolves.toBe(false)
     expect(n.lastError).toContain('Auth failed')
+  })
+})
+
+describe('normalizeSmtpHost（用户粘贴 http://smtp.qq.com/ 事故固化）', () => {
+  it('剥协议前缀/路径/尾斜杠/尾端口', () => {
+    expect(normalizeSmtpHost('http://smtp.qq.com/')).toBe('smtp.qq.com')
+    expect(normalizeSmtpHost('https://smtp.163.com')).toBe('smtp.163.com')
+    expect(normalizeSmtpHost('smtp://smtp.qq.com/mail')).toBe('smtp.qq.com')
+    expect(normalizeSmtpHost('smtp.qq.com:465')).toBe('smtp.qq.com')
+    expect(normalizeSmtpHost('  smtp.qq.com/  ')).toBe('smtp.qq.com')
+  })
+
+  it('裸域名原样保留', () => {
+    expect(normalizeSmtpHost('smtp.qq.com')).toBe('smtp.qq.com')
+  })
+
+  it('脏 host 经 emailConfigFromSecrets 读取自愈（历史配置免重填）', () => {
+    const fake = {
+      getOptional: (k: string) =>
+        (({ SMTP_HOST: 'http://smtp.qq.com/', SMTP_USER: 'u', SMTP_PASS: 'p', MAIL_TO: 't' }) as Record<string, string>)[k] || undefined,
+    } as unknown as Secrets
+    expect(emailConfigFromSecrets(fake)?.host).toBe('smtp.qq.com')
   })
 })
 

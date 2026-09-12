@@ -8,7 +8,7 @@ import type { Store } from './store/db.js'
 import type { Pipeline } from './core/pipeline.js'
 import type { Scheduler } from './core/scheduler.js'
 import type { Secrets } from './core/secrets.js'
-import { emailConfigFromSecrets } from './core/notifier.js'
+import { emailConfigFromSecrets, normalizeSmtpHost } from './core/notifier.js'
 import type { AlertHub } from './core/notifier.js'
 import type { AppProfile, BackupTarget, DetectedDraft, RunRecord } from './types.js'
 
@@ -547,7 +547,7 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     const cfg = emailConfigFromSecrets(secrets)
     return {
       configured: cfg !== null,
-      host: secrets.getOptional('SMTP_HOST') ?? '',
+      host: normalizeSmtpHost(secrets.getOptional('SMTP_HOST') ?? ''),
       port: Number(secrets.getOptional('SMTP_PORT') ?? '465') || 465,
       user: secrets.getOptional('SMTP_USER') ?? '',
       to: secrets.getOptional('MAIL_TO') ?? '',
@@ -584,7 +584,7 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
       upsertSecret('MAIL_TO', '')
       return { email: emailView() }
     }
-    if (b.host !== undefined) upsertSecret('SMTP_HOST', b.host.trim())
+    if (b.host !== undefined) upsertSecret('SMTP_HOST', normalizeSmtpHost(b.host))
     if (b.port !== undefined) upsertSecret('SMTP_PORT', String(Number(b.port) || 465))
     if (b.user !== undefined) upsertSecret('SMTP_USER', b.user.trim())
     if (b.to !== undefined) upsertSecret('MAIL_TO', b.to.trim())

@@ -103,9 +103,22 @@ export interface EmailConfig {
   to: string
 }
 
+/**
+ * SMTP host 输入归一化：用户总会粘贴成 http://smtp.qq.com/ 这类网址形态，
+ * 而 nodemailer 要的是裸主机名——剥协议前缀、路径、尾部斜杠。
+ * 保存与读取两侧都过一遍（读取侧让历史脏数据自愈）。
+ */
+export function normalizeSmtpHost(raw: string): string {
+  let h = raw.trim()
+  h = h.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '') // http:// smtp:// ssl:// 等协议前缀
+  h = h.replace(/\/.*$/, '') // 路径与尾斜杠
+  h = h.replace(/:\d+$/, '') // 尾部端口（端口请填端口字段）
+  return h
+}
+
 /** 从 Secrets 组装邮箱配置（懒读，配置不全返回 null）；465=SSL，其余按 STARTTLS */
 export function emailConfigFromSecrets(secrets: Secrets): EmailConfig | null {
-  const host = secrets.getOptional('SMTP_HOST')
+  const host = normalizeSmtpHost(secrets.getOptional('SMTP_HOST') ?? '')
   const user = secrets.getOptional('SMTP_USER')
   const pass = secrets.getOptional('SMTP_PASS')
   const to = secrets.getOptional('MAIL_TO')
