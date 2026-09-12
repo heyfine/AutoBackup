@@ -392,10 +392,11 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
   /** 新应用检测（docker 容器 → 草稿建议，UI 编辑器按需，不落库） */
   app.post('/api/detect', async () => {
     const { detectContainers } = await import('./core/detector.js')
+    const { coveredContainersOf, coveredPathsOf } = await import('./core/auto-detect.js')
     const profiles = store.listProfiles({ includeDrafts: true })
-    const covered = profiles.flatMap((p) => p.containers)
+    const covered = coveredContainersOf(profiles)
     try {
-      const result = await detectContainers(covered)
+      const result = await detectContainers(covered, coveredPathsOf(profiles))
       return result
     } catch (err) {
       return { drafts: [], scanned: 0, error: err instanceof Error ? err.message : String(err) }

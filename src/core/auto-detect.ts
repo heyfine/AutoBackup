@@ -27,6 +27,25 @@ export interface ScanOutcome {
   removed: string[]
 }
 
+/**
+ * 既有档案的「覆盖口径」：v2 合并档案的容器/路径在 parts[] 里，顶层字段是旧格式兼容位
+ * ——两侧都必须计入，否则合并过的档案会被视作未覆盖而产生重复档案（2026-09-12 VPS 首轮实扫事故）。
+ */
+export function coveredContainersOf(profiles: AppProfile[]): string[] {
+  return profiles.flatMap((p) => [
+    ...(p.containers ?? []),
+    ...(p.parts ?? []).map((x) => x.container).filter((c): c is string => !!c),
+  ])
+}
+
+export function coveredPathsOf(profiles: AppProfile[]): string[] {
+  return profiles.flatMap((p) => [
+    ...(p.paths ?? []),
+    ...(p.parts ?? []).flatMap((x) => x.paths ?? []),
+    ...(p.parts ?? []).map((x) => x.dbPath).filter((d): d is string => !!d),
+  ])
+}
+
 function draftToProfile(d: DetectResult['drafts'][number]): AppProfile {
   const sp = d.suggestedProfile
   return {
@@ -60,8 +79,8 @@ export async function scanAndRegister(
   // 注意：必须含停用档案（includeDrafts=全量语义）——刚落库未启用的 auto_ 档案、
   // 用户手工建但暂关的档案，其 containers/paths 都要参与去重与清理判定
   const existing = store.listProfiles({ includeDrafts: true })
-  const coveredContainers = existing.flatMap((p) => p.containers)
-  const existingPaths = existing.flatMap((p) => p.paths)
+  const coveredContainers = coveredContainersOf(existing)
+  const existingPaths = coveredPathsOf(existing)
   const { drafts } = await deps.detect(coveredContainers, existingPaths)
 
   const added: string[] = []

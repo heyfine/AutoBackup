@@ -111,6 +111,42 @@ describe('scanAndRegister', () => {
     expect(store.getProfile('auto_app-a')).toBeTruthy()
   })
 
+  it('v2 合并档案（信息在 parts[]）的容器与路径必须计入覆盖——VPS 首轮误报事故回归', async () => {
+    // 建一个 v2 形态档案：顶层 containers/paths 为空，内容全在 parts
+    store.upsertProfile({
+      id: 'p_vault_merged',
+      name: 'Vaultwarden 合并档',
+      kind: 'sqlite',
+      paths: [],
+      containers: [],
+      parts: [
+        { kind: 'sqlite', label: 'db', container: 'vaultwarden', dbPath: '/opt/vaultwarden/data/db.sqlite3', paths: [] },
+        { kind: 'config', label: 'cfg', paths: ['/opt/vaultwarden/compose.yaml'] },
+      ],
+      encrypt: true,
+      consistency: 'consistent',
+      schedule: { mode: 'daily', at: '03:00' },
+      targetIds: [],
+      keep: 7,
+      enabled: true,
+      isDraft: false,
+    })
+    let seenContainers: string[] = []
+    let seenPaths: string[] = []
+    await scanAndRegister(store, hub, {
+      detect: async (cov, paths) => {
+        seenContainers = cov
+        seenPaths = paths
+        return { drafts: [], scanned: 0 }
+      },
+      runningContainers: async () => new Set(['vaultwarden']),
+    })
+    expect(seenContainers).toContain('vaultwarden') // parts.container 计入
+    expect(seenPaths).toContain('/opt/vaultwarden/data/db.sqlite3') // parts.dbPath 计入
+    // 且不会为已被 parts 覆盖的容器产生重复档案（fake detect 尊重 covered 返回空 → 无新增）
+    expect(store.getProfile('auto_vaultwarden')).toBeFalsy()
+  })
+
   it('手动档案（非 auto_ 前缀）永不被清理逻辑触碰', async () => {
     store.upsertProfile({
       id: 'p_manual',
