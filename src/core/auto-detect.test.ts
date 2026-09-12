@@ -6,6 +6,16 @@ import { Store } from '../store/db.js'
 import type { AlertHub } from './notifier.js'
 import type { DetectedDraft } from '../types.js'
 import { scanAndRegister } from './auto-detect.js'
+import { pathOverlaps } from './detector.js'
+
+describe('pathOverlaps（目录/文件互为前缀的去重口径）', () => {
+  it('db 文件在既有目录内=重叠；不同目录=不重叠；同名目录带斜杠=重叠', () => {
+    expect(pathOverlaps('/opt/vaultwarden/data/db.sqlite3', ['/opt/vaultwarden/data'])).toBe(true)
+    expect(pathOverlaps('/opt/vaultwarden/data', ['/opt/vaultwarden/data/db.sqlite3'])).toBe(true)
+    expect(pathOverlaps('/opt/vaultwarden/data2', ['/opt/vaultwarden/data'])).toBe(false)
+    expect(pathOverlaps('/opt/data/', ['/opt/data'])).toBe(true)
+  })
+})
 
 /**
  * 自动扫描入档回归（2026-09-12，用户拍板：自动入档但备份开关默认关）。

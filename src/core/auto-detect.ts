@@ -41,6 +41,7 @@ export function coveredContainersOf(profiles: AppProfile[]): string[] {
 export function coveredPathsOf(profiles: AppProfile[]): string[] {
   return profiles.flatMap((p) => [
     ...(p.paths ?? []),
+    ...(p.dbPath ? [p.dbPath] : []),
     ...(p.parts ?? []).flatMap((x) => x.paths ?? []),
     ...(p.parts ?? []).map((x) => x.dbPath).filter((d): d is string => !!d),
   ])

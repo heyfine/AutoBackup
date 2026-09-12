@@ -107,7 +107,7 @@ export async function listRunningContainers(): Promise<Set<string>> {
 }
 
 /** 宿主机路径是否与既有档案路径重叠（互为前缀即视为重叠，防同一数据目录重复出草稿） */
-function pathOverlaps(candidate: string, existingPaths: string[]): boolean {
+export function pathOverlaps(candidate: string, existingPaths: string[]): boolean {
   const clean = candidate.replace(/\/+$/, '')
   return existingPaths.some((ep) => {
     const base = ep.replace(/\/+$/, '')
@@ -149,18 +149,23 @@ export async function detectContainers(
     let matched = false
     for (const fp of FINGERPRINTS) {
       if (fp.match.test(image)) {
-        const suggested = fp.suggest({ name, image, mounts }, mounts)
-        drafts.push({
-          containerName: name,
-          image,
-          mounts: mounts.map((m) => ({ type: m.type as 'bind' | 'volume', source: m.source, dest: m.dest })),
-          suggestedProfile: {
-            ...suggested,
-            containers: suggested.containers ?? [name],
-          },
-          confidence: 'high',
-        })
         matched = true
+        const suggested = fp.suggest({ name, image, mounts }, mounts)
+        // 高置信建议也要路径级去重：档案容器名漂移/手改过而路径覆盖仍有效时，不产重复建议
+        const sugPaths = [...(suggested.paths ?? []), ...(suggested.dbPath ? [suggested.dbPath] : [])]
+        const coveredByPaths = sugPaths.length > 0 && sugPaths.every((p) => existingPaths.some((ep) => pathOverlaps(p, [ep])))
+        if (!coveredByPaths) {
+          drafts.push({
+            containerName: name,
+            image,
+            mounts: mounts.map((m) => ({ type: m.type as 'bind' | 'volume', source: m.source, dest: m.dest })),
+            suggestedProfile: {
+              ...suggested,
+              containers: suggested.containers ?? [name],
+            },
+            confidence: 'high',
+          })
+        }
         break
       }
     }
