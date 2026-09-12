@@ -47,6 +47,33 @@ function pathExists(path) {
   }
 }
 
+/**
+ * 把 .gitignore 清单项展开成具体文件列表。
+ * git update-index 不递归目录、不展开通配符（会打印「Ignoring path」静默漏掉），
+ * 必须先在这里展开；普通文件原样保留。globSync 在 Windows 下返回反斜杠路径，统一转正斜杠。
+ */
+function expandEntries(entries) {
+  const files = new Set();
+  for (const entry of entries) {
+    if (entry.endsWith('/')) {
+      for (const p of globSync(entry + '**/*')) addFile(p, files);
+    } else if (/[*?[]/.test(entry)) {
+      for (const p of globSync(entry)) addFile(p, files);
+    } else {
+      addFile(entry, files);
+    }
+  }
+  return [...files].sort();
+}
+
+function addFile(p, set) {
+  try {
+    if (statSync(p).isFile()) set.add(p.replaceAll('\\', '/'));
+  } catch {
+    // 路径不存在：readInternalDocs 已按清单粒度校验过，单项缺失可忽略
+  }
+}
+
 function main() {
   const branch = git(['rev-parse', '--abbrev-ref', 'HEAD']);
   if (branch === 'HEAD') {
@@ -57,7 +84,10 @@ function main() {
     throw new Error('工作区有未提交的改动，请先 commit 再同步');
   }
 
-  const docs = readInternalDocs();
+  const docs = expandEntries(readInternalDocs());
+  if (docs.length === 0) {
+    throw new Error('内部文档展开后为空，拒绝构建空快照');
+  }
 
   console.log(`[1/3] 推送 ${branch} → origin（公开仓库）`);
   git(['push', 'origin', branch]);
