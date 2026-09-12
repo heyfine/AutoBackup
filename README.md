@@ -1,4 +1,4 @@
-# AutoBackup（AutoDav）
+# AutoBackup
 
 VPS 上的自动备份中心：**自动检测应用 → 一致性快照 → 合并打包加密 → 推送多 WebDAV 网盘 → 自定义保留 → 失败必告警 → 一键整体还原**。
 
@@ -41,8 +41,8 @@ tar.gz 打包 ──(敏感档案)──> age 加密          + manifest.json（
 要求：Linux VPS（推荐）或任意能跑 Node.js ≥ 22 的机器，pnpm，Docker（仅当你要备份数据库容器）。
 
 ```bash
-git clone https://github.com/heyfine/AutoDav.git
-cd AutoDav
+git clone https://github.com/heyfine/AutoBackup.git
+cd AutoBackup
 pnpm install
 pnpm build
 ```
