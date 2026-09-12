@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Store } from './store/db.js'
 import { Secrets, resolveSecretsPath } from './core/secrets.js'
-import { BarkNotifier } from './core/notifier.js'
+import { BarkNotifier, EmailNotifier, emailConfigFromSecrets, AlertHub } from './core/notifier.js'
 import { Pipeline } from './core/pipeline.js'
 import { Scheduler } from './core/scheduler.js'
 import { TOOL_VERSION } from './core/packer.js'
@@ -25,15 +25,17 @@ function parseArgs(argv: string[]): Cli {
   return { command, args }
 }
 
-async function bootstrap(): Promise<{
+interface AppCtx {
   store: Store
   secrets: Secrets
-  notifier: BarkNotifier
+  hub: AlertHub
   pipeline: Pipeline
   scheduler: Scheduler
   homeDir: string
   secretsPath: string
-}> {
+}
+
+async function bootstrap(): Promise<AppCtx> {
   const homeDir = process.env.AUTOBACKUP_HOME ?? process.cwd()
   mkdirSync(join(homeDir, 'artifacts'), { recursive: true })
   mkdirSync(join(homeDir, 'logs'), { recursive: true })
@@ -41,10 +43,13 @@ async function bootstrap(): Promise<{
   const store = new Store(join(homeDir, 'autobackup.db'))
   const secretsPath = resolveSecretsPath(homeDir)
   const secrets = new Secrets(secretsPath)
-  const notifier = new BarkNotifier(() => secrets.getOptional('BARK_URL'))
-  const pipeline = new Pipeline({ store, secrets, homeDir, notify: notifier, toolVersion: TOOL_VERSION })
+  const hub = new AlertHub([
+    new BarkNotifier(() => secrets.getOptional('BARK_URL')),
+    new EmailNotifier(() => emailConfigFromSecrets(secrets)),
+  ])
+  const pipeline = new Pipeline({ store, secrets, homeDir, notify: hub, toolVersion: TOOL_VERSION })
   const scheduler = new Scheduler(store, pipeline)
-  return { store, secrets, notifier, pipeline, scheduler, homeDir, secretsPath }
+  return { store, secrets, hub, pipeline, scheduler, homeDir, secretsPath }
 }
 
 async function main(): Promise<void> {
@@ -117,7 +122,7 @@ async function main(): Promise<void> {
         scheduler: ctx.scheduler,
         secrets: ctx.secrets,
         secretsPath: ctx.secretsPath,
-        notify: ctx.notifier,
+        notify: ctx.hub,
         port: Number(process.env.AUTOBACKUP_PORT ?? 8199),
       })
       const shutdown = (): void => {

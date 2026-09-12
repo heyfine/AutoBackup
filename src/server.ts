@@ -8,7 +8,8 @@ import type { Store } from './store/db.js'
 import type { Pipeline } from './core/pipeline.js'
 import type { Scheduler } from './core/scheduler.js'
 import type { Secrets } from './core/secrets.js'
-import type { BarkNotifier } from './core/notifier.js'
+import { emailConfigFromSecrets } from './core/notifier.js'
+import type { AlertHub } from './core/notifier.js'
 import type { AppProfile, BackupTarget, DetectedDraft, RunRecord } from './types.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -23,7 +24,7 @@ export interface ApiDeps {
   scheduler: Scheduler
   secrets: Secrets
   secretsPath: string
-  notify: BarkNotifier
+  notify: AlertHub
   port: number
 }
 
@@ -540,9 +541,21 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     ;(secrets as unknown as { values: Map<string, string> }).values.set(key, value)
   }
 
-  // ---- 告警通知（Bark）----
-  /** 只回是否已配置；Bark URL 含设备密钥，按凭据处理，永不回显 */
-  app.get('/api/notify/status', async () => ({ barkConfigured: secrets.has('BARK_URL') }))
+  // ---- 告警通知（Bark 推送 + Email/SMTP 双通道）----
+  /** 邮箱通道视图：host/发件人/收件人非机密可回显；授权码按凭据处理永不回显 */
+  function emailView() {
+    const cfg = emailConfigFromSecrets(secrets)
+    return {
+      configured: cfg !== null,
+      host: secrets.getOptional('SMTP_HOST') ?? '',
+      port: Number(secrets.getOptional('SMTP_PORT') ?? '465') || 465,
+      user: secrets.getOptional('SMTP_USER') ?? '',
+      to: secrets.getOptional('MAIL_TO') ?? '',
+      hasPassword: secrets.has('SMTP_PASS'),
+    }
+  }
+
+  app.get('/api/notify/status', async () => ({ barkConfigured: secrets.has('BARK_URL'), email: emailView() }))
 
   app.post('/api/notify/bark', async (req) => {
     const { url } = (req.body ?? {}) as { url?: string }
@@ -550,13 +563,42 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     return { barkConfigured: secrets.has('BARK_URL') }
   })
 
-  /** 发一条测试推送，验证告警通道真实可达（失败必告警的闭环入口） */
+  /** 发一条测试推送到 Bark，验证告警通道真实可达（失败必告警的闭环入口） */
   app.post('/api/notify/test', async () => {
-    if (!secrets.has('BARK_URL')) {
+    const ch = notify.channel('bark')
+    if (!ch || !ch.isConfigured()) {
       return { sent: false, error: '未配置 BARK_URL' }
     }
-    const sent = await notify.send('test', '✅ 测试通知：AutoBackup 告警通道已连通')
-    return { sent, error: sent ? undefined : 'Bark 投递失败（检查网络/密钥/服务状态）' }
+    const sent = await ch.send('test', '✅ 测试通知：AutoBackup 告警通道已连通', 'active')
+    return { sent, error: sent ? undefined : ch.lastError || 'Bark 投递失败（检查网络/密钥/服务状态）' }
+  })
+
+  /** 保存 SMTP 邮箱通道配置（原子写 secrets，热生效）。pass 留空=保持现值；clear=true 一键清空 */
+  app.post('/api/notify/email', async (req) => {
+    const b = (req.body ?? {}) as { host?: string; port?: number | string; user?: string; pass?: string; to?: string; clear?: boolean }
+    if (b.clear) {
+      upsertSecret('SMTP_HOST', '')
+      upsertSecret('SMTP_PORT', '')
+      upsertSecret('SMTP_USER', '')
+      upsertSecret('SMTP_PASS', '')
+      upsertSecret('MAIL_TO', '')
+      return { email: emailView() }
+    }
+    if (b.host !== undefined) upsertSecret('SMTP_HOST', b.host.trim())
+    if (b.port !== undefined) upsertSecret('SMTP_PORT', String(Number(b.port) || 465))
+    if (b.user !== undefined) upsertSecret('SMTP_USER', b.user.trim())
+    if (b.to !== undefined) upsertSecret('MAIL_TO', b.to.trim())
+    if (b.pass) upsertSecret('SMTP_PASS', b.pass) // 授权码空值不覆盖，支持「只改收件人」场景
+    return { email: emailView() }
+  })
+
+  app.post('/api/notify/email/test', async () => {
+    const ch = notify.channel('email')
+    if (!ch || !ch.isConfigured()) {
+      return { sent: false, error: 'SMTP 配置不完整（服务器/发件邮箱/授权码/收件邮箱 均必填）' }
+    }
+    const sent = await ch.send('test', '✅ 测试邮件：AutoBackup 邮箱告警通道已连通', 'active')
+    return { sent, error: sent ? undefined : ch.lastError || '邮件投递失败（检查网络/端口/授权码）' }
   })
 
   // ---- targets 凭据快捷更新（兼容 M3 早期 UI）----

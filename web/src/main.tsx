@@ -1021,6 +1021,155 @@ function BarkCard() {
   )
 }
 
+interface EmailView {
+  configured: boolean
+  host: string
+  port: number
+  user: string
+  to: string
+  hasPassword: boolean
+}
+
+function EmailCard() {
+  const [view, setView] = useState<EmailView | null>(null)
+  const [host, setHost] = useState('')
+  const [port, setPort] = useState('465')
+  const [user, setUser] = useState('')
+  const [pass, setPass] = useState('')
+  const [to, setTo] = useState('')
+  const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  async function refresh() {
+    try {
+      const r = await api<{ email: EmailView }>('/api/notify/status')
+      setView(r.email)
+      return r.email
+    } catch {
+      setView(null)
+      return null
+    }
+  }
+  useEffect(() => {
+    void refresh().then((v) => {
+      if (v) {
+        if (v.host) setHost(v.host)
+        setPort(String(v.port))
+        if (v.user) setUser(v.user)
+        if (v.to) setTo(v.to)
+      }
+    })
+  }, [])
+
+  async function withBusy(fn: () => Promise<void>) {
+    setBusy(true)
+    setNotice(null)
+    try {
+      await fn()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function save() {
+    await withBusy(async () => {
+      try {
+        await api('/api/notify/email', {
+          method: 'POST',
+          body: JSON.stringify({ host, port: Number(port) || 465, user, to, pass: pass || undefined }),
+        })
+        setPass('')
+        const v = await refresh()
+        setNotice(
+          v?.configured
+            ? { ok: true, text: '已保存并即时生效——建议点「发测试邮件」验证' }
+            : { ok: false, text: '已保存，但配置不完整（服务器/发件邮箱/授权码/收件邮箱缺一不可），暂不会发送邮件' },
+        )
+      } catch (ex) {
+        setNotice({ ok: false, text: `保存失败：${ex instanceof Error ? ex.message : String(ex)}` })
+      }
+    })
+  }
+
+  async function test() {
+    await withBusy(async () => {
+      try {
+        const r = await api<{ sent: boolean; error?: string }>('/api/notify/email/test', { method: 'POST' })
+        setNotice(r.sent ? { ok: true, text: '测试邮件已发出 ✅ 请查收收件箱（含垃圾箱）' } : { ok: false, text: r.error ?? '发送失败' })
+      } catch (ex) {
+        setNotice({ ok: false, text: `发送失败：${ex instanceof Error ? ex.message : String(ex)}` })
+      }
+    })
+  }
+
+  async function clear() {
+    await withBusy(async () => {
+      try {
+        await api('/api/notify/email', { method: 'POST', body: JSON.stringify({ clear: true }) })
+        setView(await refresh())
+        setPass('')
+        setNotice({ ok: true, text: '邮箱通道已清空关闭（发件/收件/host 保留显示为空即为已清）' })
+      } catch (ex) {
+        setNotice({ ok: false, text: `操作失败：${ex instanceof Error ? ex.message : String(ex)}` })
+      }
+    })
+  }
+
+  return (
+    <div class="card wide">
+      <div class="card-head">
+        <span class="name">备份失败告警（邮箱 SMTP）</span>
+        {view === null ? (
+          <span class="badge">加载中…</span>
+        ) : view.configured ? (
+          <span class="badge ok">已配置</span>
+        ) : (
+          <span class="badge warn">未配置</span>
+        )}
+      </div>
+      <div class="card-meta muted">
+        与 Bark 并行的第二告警通道：备份失败同时发 email（连续 3 次失败主题带 🚨 高优先级）。
+        以 QQ 邮箱为例：设置→账号→POP3/SMTP→开启并取<strong>授权码</strong>（不是登录密码），host 填 smtp.qq.com、port 465。
+      </div>
+      {notice && <div class={notice.ok ? 'banner-ok' : 'banner-err'}>{notice.text}</div>}
+      <div class="form-grid">
+        <label>
+          SMTP 服务器
+          <input value={host} onInput={(e) => setHost(e.currentTarget.value)} placeholder="smtp.qq.com" />
+        </label>
+        <label>
+          端口
+          <input value={port} onInput={(e) => setPort(e.currentTarget.value)} placeholder="465" />
+        </label>
+        <label>
+          发件邮箱
+          <input value={user} onInput={(e) => setUser(e.currentTarget.value)} placeholder="you@qq.com" />
+        </label>
+        <label>
+          收件邮箱
+          <input value={to} onInput={(e) => setTo(e.currentTarget.value)} placeholder="you@qq.com" />
+        </label>
+        <label class="full">
+          授权码{view?.hasPassword ? '（已保存，留空=保持不变）' : ''}
+          <input type="password" value={pass} onInput={(e) => setPass(e.currentTarget.value)} placeholder="SMTP 授权码，非邮箱登录密码" />
+        </label>
+      </div>
+      <div class="btn-row">
+        <button disabled={busy || !(host && user && to) || (!view?.hasPassword && !pass)} onClick={() => void save()}>
+          保存
+        </button>
+        <button disabled={busy || !view?.configured} onClick={() => void test()}>
+          发测试邮件
+        </button>
+        <button disabled={busy || !view?.host} onClick={() => void clear()}>
+          清空配置
+        </button>
+      </div>
+      <div class="card-meta muted">授权码保存后永不回显；465 走 SSL，587 走 STARTTLS。</div>
+    </div>
+  )
+}
+
 function Settings() {
   const [msg, setMsg] = useState('')
   const submit = async (e: Event) => {
@@ -1050,6 +1199,7 @@ function Settings() {
         <div class="card-meta muted">修改后所有已登录设备强制登出（30 天记住设备）</div>
       </div>
       <BarkCard />
+      <EmailCard />
     </>
   )
 }

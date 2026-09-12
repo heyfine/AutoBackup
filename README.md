@@ -13,7 +13,7 @@ VPS 上的自动备份中心：**自动检测应用 → 一致性快照 → 合�
 - **一致性快照**：SQLite 走官方 backup API 在线热备并跑 integrity_check；MariaDB `--single-transaction`；PostgreSQL `pg_dump -Fc`；数据库凭据经 `--defaults-extra-file` 注入，不进命令行
 - **加密**：敏感档案 age 加密，备份包落到第三方网盘也不可读；manifest 清单保持明文，供远端浏览与 sha256 校验
 - **多 WebDAV 目标**：同时推多家网盘（Koofr、InfiniCloud 等 WebDAV 服务均可），每家独立保留份数与容量水位预警
-- **失败必告警**：任何一次运行失败，Bark 推送直接到手机——静默失败零容忍
+- **失败必告警**：任何一次运行失败，Bark 推送直达手机，还可叠加邮箱（SMTP）第二通道双路齐发、互不阻塞——静默失败零容忍
 - **一键整体还原**：按 manifest 路由恢复全部勾选项；数据库自动停容器 → 校验 → 替换 → 起容器；还原前自动兜底当前数据，还原本身可回退
 - **临时产物自动清理**：预览解包 / 还原工作区 / 兜底备份 24h 自动删除
 - **Web 控制台**：单管理员登录，档案、目标、运行记录、还原全部网页操作
@@ -63,6 +63,13 @@ AGE_RECIPIENT=age1xxxxxxxxxxxxxxxxxxxx
 
 # Bark 失败告警（不配则只写日志）
 BARK_URL=https://api.day.app/yourkey
+
+# 邮箱告警（可选第二通道；任何可开 SMTP 的邮箱，QQ/163 用「授权码」而非登录密码）
+# SMTP_HOST=smtp.qq.com
+# SMTP_PORT=465            # 465=SSL，587=STARTTLS
+# SMTP_USER=you@qq.com     # 发件邮箱
+# SMTP_PASS=your-authcode  # SMTP 授权码
+# MAIL_TO=you@qq.com       # 收件邮箱（可与他人不同）
 ```
 
 ### 2. 创建管理员账号
@@ -96,7 +103,7 @@ systemctl daemon-reload && systemctl enable --now autobackup
 3. **设置调度**：每日定时或固定间隔；不手动干预，备份就会自己发生
 4. **看运行台账**：每次运行的开始时间、耗时、包大小、sha256、成败状态全部留档——备份不再是"薛定谔的"
 5. **还原**：选一个历史备份包 → **预览**（解包查看内容清单）→ **整体还原**。数据库部分自动停容器→校验→替换→起容器；目录/配置直接覆盖；动手前当前数据会被自动兜底一份
-6. **失败告警**：打开「设置 → 备份失败告警」填入 Bark URL，保存即生效（免重启），点「发测试通知」验证手机响铃——此后任何失败都会推送到手机，成功不打扰。CLI 部署也可直接在 `secrets.env` 写 `BARK_URL`
+6. **失败告警**：设置页提供 **Bark** 与 **邮箱（SMTP）** 两条通道，配齐即启用、双路同时推送互不阻塞，各带「发测试」按钮当场验证；连续 3 次失败自动升级（Bark 持续响铃 / 邮件 🚨 高优先级）。CLI 部署也可直接写 `BARK_URL` / `SMTP_*` 进 `secrets.env`
 
 ## CLI 命令
 
