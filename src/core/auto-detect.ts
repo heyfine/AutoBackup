@@ -1,4 +1,5 @@
 import type { Store } from '../store/db.js'
+import type { Secrets } from './secrets.js'
 import type { AppProfile } from '../types.js'
 import type { AlertHub } from './notifier.js'
 import { detectContainers, listRunningContainers, type DetectResult } from './detector.js'
@@ -15,11 +16,17 @@ export const AUTO_PREFIX = 'auto_'
 export interface AutoDetectDeps {
   detect: (coveredContainers: string[], existingPaths: string[]) => Promise<DetectResult>
   runningContainers: () => Promise<Set<string>>
+  /** 「发现新应用」通知开关（懒读 secrets，用户可关）：false 时照常入档，只是不发通知 */
+  notifyEnabled: () => boolean
 }
 
-const liveDeps: AutoDetectDeps = {
-  detect: detectContainers,
-  runningContainers: listRunningContainers,
+/** NOTIFY_NEW_APP 缺省=开启（保持默认行为），显式置 '0' 关闭 */
+export function makeLiveDeps(secrets: Secrets): AutoDetectDeps {
+  return {
+    detect: detectContainers,
+    runningContainers: listRunningContainers,
+    notifyEnabled: () => secrets.getOptional('NOTIFY_NEW_APP') !== '0',
+  }
 }
 
 export interface ScanOutcome {
@@ -75,7 +82,7 @@ function draftToProfile(d: DetectResult['drafts'][number]): AppProfile {
 export async function scanAndRegister(
   store: Store,
   hub: AlertHub,
-  deps: AutoDetectDeps = liveDeps,
+  deps: AutoDetectDeps,
 ): Promise<ScanOutcome> {
   // 注意：必须含停用档案（includeDrafts=全量语义）——刚落库未启用的 auto_ 档案、
   // 用户手工建但暂关的档案，其 containers/paths 都要参与去重与清理判定
@@ -91,7 +98,7 @@ export async function scanAndRegister(
     store.upsertProfile(draftToProfile(d))
     added.push(`${d.containerName}（${d.confidence === 'high' ? '已识别' : '未识别，按数据目录入档'}）`)
   }
-  if (added.length > 0) {
+  if (added.length > 0 && deps.notifyEnabled()) {
     await hub.send(
       'new_app_added',
       `🆕 检测到新应用并已加入档案（备份开关默认关闭）：${added.join('、')}。请到控制台核对后开启。`,
@@ -108,7 +115,7 @@ export async function scanAndRegister(
       removed.push(p.name)
     }
   }
-  if (removed.length > 0) {
+  if (removed.length > 0 && deps.notifyEnabled()) {
     await hub.send('auto_profile_removed', `🧹 已自动移除未启用的过期档案（容器已消失）：${removed.join('、')}`)
   }
 
@@ -116,9 +123,14 @@ export async function scanAndRegister(
 }
 
 /** 常驻定时扫描：启动立即一轮 + 每 interval 一轮；返回 disposer（serve shutdown 释放）。 */
-export function startAutoDetect(store: Store, hub: AlertHub, intervalMs = 6 * 3600_000): () => void {
+export function startAutoDetect(
+  store: Store,
+  hub: AlertHub,
+  deps: AutoDetectDeps,
+  intervalMs = 6 * 3600_000,
+): () => void {
   const run = (): void => {
-    scanAndRegister(store, hub).catch((err: unknown) => {
+    scanAndRegister(store, hub, deps).catch((err: unknown) => {
       // 扫描故障（如无 docker 的开发机）只记日志，不打扰用户、不产生告警轰炸
       console.warn(`[auto-detect] 扫描失败（忽略，下轮重试）：${err instanceof Error ? err.message : String(err)}`)
     })

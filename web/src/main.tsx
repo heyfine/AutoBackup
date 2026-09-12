@@ -927,6 +927,49 @@ function AccountCard() {
   )
 }
 
+function NewAppNotifyCard() {
+  const [on, setOn] = useState<boolean | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    api<{ newAppNotify: boolean }>('/api/notify/status')
+      .then((r) => setOn(r.newAppNotify))
+      .catch(() => setOn(true))
+  }, [])
+
+  async function toggleTo(v: boolean) {
+    setBusy(true)
+    try {
+      const r = await api<{ newAppNotify: boolean }>('/api/notify/prefs', {
+        method: 'POST',
+        body: JSON.stringify({ newAppNotify: v }),
+      })
+      setOn(r.newAppNotify)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div class="card wide">
+      <div class="card-head">
+        <span class="name">新应用发现通知</span>
+        {on !== null && (
+          <span class={on ? 'badge ok' : 'badge'}>{on ? '已开启' : '已关闭'}</span>
+        )}
+        <span style="margin-left:auto">
+          <Toggle checked={on ?? true} onChange={(v) => void toggleTo(v)} />
+        </span>
+      </div>
+      <div class="card-meta muted">
+        开启时：自动扫描发现新应用并入档后，经 Bark/邮件推送「已加入档案，请核对」。
+        关闭后：仍会<b>静默自动入档</b>（档案页徽标与横幅照常），只是不发通知——嫌打扰就关。
+      </div>
+      {busy && <span class="muted">保存中…</span>}
+    </div>
+  )
+}
+
 function BarkCard() {
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [url, setUrl] = useState('')
@@ -1185,6 +1228,7 @@ function Settings() {
         </form>
         <div class="card-meta muted">修改后所有已登录设备强制登出（30 天记住设备）</div>
       </div>
+      <NewAppNotifyCard />
       <BarkCard />
       <EmailCard />
     </>

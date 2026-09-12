@@ -111,8 +111,8 @@ async function main(): Promise<void> {
       break
     }
     case 'scan': {
-      const { scanAndRegister } = await import('./core/auto-detect.js')
-      const out = await scanAndRegister(ctx.store, ctx.hub)
+      const { scanAndRegister, makeLiveDeps } = await import('./core/auto-detect.js')
+      const out = await scanAndRegister(ctx.store, ctx.hub, makeLiveDeps(ctx.secrets))
       if (out.added.length) console.log(`已入档（开关默认关）：${out.added.join('、')}`)
       if (out.removed.length) console.log(`清理过期自动档案：${out.removed.join('、')}`)
       if (!out.added.length && !out.removed.length) console.log('扫描完成：没有新应用（已有档案未被改动）')
@@ -123,8 +123,8 @@ async function main(): Promise<void> {
       ctx.scheduler.start()
       const { startTempCleanupTimer } = await import('./core/temp-cleanup.js')
       const stopCleanup = startTempCleanupTimer(ctx.homeDir)
-      const { startAutoDetect } = await import('./core/auto-detect.js')
-      const stopAutoDetect = startAutoDetect(ctx.store, ctx.hub)
+      const { startAutoDetect, makeLiveDeps } = await import('./core/auto-detect.js')
+      const stopAutoDetect = startAutoDetect(ctx.store, ctx.hub, makeLiveDeps(ctx.secrets))
       const { startApi } = await import('./server.js')
       const api = await startApi({
         store: ctx.store,

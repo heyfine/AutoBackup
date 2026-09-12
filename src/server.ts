@@ -405,9 +405,9 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
 
   /** 手动执行一轮「自动入档」扫描（与 6h 定时同逻辑）：新应用→档案 enabled=false */
   app.post('/api/detect/scan-now', async () => {
-    const { scanAndRegister } = await import('./core/auto-detect.js')
+    const { scanAndRegister, makeLiveDeps } = await import('./core/auto-detect.js')
     try {
-      return await scanAndRegister(store, notify)
+      return await scanAndRegister(store, notify, makeLiveDeps(secrets))
     } catch (err) {
       return { added: [], removed: [], error: err instanceof Error ? err.message : String(err) }
     }
@@ -566,7 +566,18 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     }
   }
 
-  app.get('/api/notify/status', async () => ({ barkConfigured: secrets.has('BARK_URL'), email: emailView() }))
+  app.get('/api/notify/status', async () => ({
+    barkConfigured: secrets.has('BARK_URL'),
+    newAppNotify: secrets.getOptional('NOTIFY_NEW_APP') !== '0',
+    email: emailView(),
+  }))
+
+  /** 告警偏好：newAppNotify = 「发现新应用入档」是否通知（关=只静默入档，不发 Bark/邮件） */
+  app.post('/api/notify/prefs', async (req) => {
+    const { newAppNotify } = (req.body ?? {}) as { newAppNotify?: boolean }
+    if (typeof newAppNotify === 'boolean') upsertSecret('NOTIFY_NEW_APP', newAppNotify ? '1' : '0')
+    return { newAppNotify: secrets.getOptional('NOTIFY_NEW_APP') !== '0' }
+  })
 
   app.post('/api/notify/bark', async (req) => {
     const { url } = (req.body ?? {}) as { url?: string }
