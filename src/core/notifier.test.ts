@@ -3,9 +3,10 @@ import { AlertHub, BarkNotifier, EmailNotifier, emailConfigFromSecrets, normaliz
 import type { Secrets } from './secrets.js'
 
 /**
- * 告警体系回归（2026-09-12 双通道改造）。
- * 守护：①懒读配置（UI 保存免重启热生效）②连续 3 次失败升级 critical（计数在 Hub，统一分发）
- * ③通道故障隔离（一通道炸不影响另一通道与备份主流程）④未配置通道不分发 ⑤test 事件不动计数。
+ * 告警体系回归（2026-09-12 双通道改造 + 2026-09-18 失败去重）。
+ * 守护：①懒读配置（UI 保存免重启热生效）②同故障去重窗口内只投递首封，超窗 critical 重申
+ * ③backup_ok 静默复位（成功不打扰，下轮失败恢复首次告警语义）④通道故障隔离
+ * ⑤未配置通道不分发 ⑥test 事件直接分发不受抑制。
  */
 
 type FetchMock = ReturnType<typeof vi.fn>
@@ -58,27 +59,49 @@ describe('BarkNotifier（level 由 Hub 传入）', () => {
   })
 })
 
-describe('AlertHub 计数与分发', () => {
-  it('连续 3 次失败升级 critical；backup_ok 归零；计数在 Hub 统一', async () => {
+describe('AlertHub 分发与失败去重', () => {
+  it('同故障去重窗口内只投递一封；backup_ok 复位后可再次投递 active', async () => {
     const bark = new BarkNotifier(() => 'https://api.day.app/key')
     const hub = new AlertHub([bark])
-    await hub.send('backup_failed', '1')
-    await hub.send('backup_failed', '2')
-    await hub.send('backup_failed', '3')
-    expect(fetchUrl(2)).toContain('level=critical')
-    await hub.send('backup_ok', 'ok')
-    await hub.send('backup_failed', '4')
-    expect(fetchUrl(4)).toContain('level=active')
+    await hub.send('backup_failed', '1', 'backup:p1')
+    await hub.send('backup_failed', '2', 'backup:p1')
+    await hub.send('backup_failed', '3', 'backup:p1')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchUrl(0)).toContain('level=active')
+    await hub.send('backup_ok', 'ok', 'backup:p1')
+    await hub.send('backup_failed', '4', 'backup:p1')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchUrl(1)).toContain('level=active')
   })
 
-  it('test 事件不影响失败计数', async () => {
+  it('持续失败超过重申窗口 → critical 重申', async () => {
+    const bark = new BarkNotifier(() => 'https://api.day.app/key')
+    const hub = new AlertHub([bark], { reAlertAfterMs: 50 })
+    await hub.send('backup_failed', '1', 'backup:p1')
+    await new Promise((r) => setTimeout(r, 80))
+    await hub.send('backup_failed', '2', 'backup:p1')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchUrl(1)).toContain('level=critical')
+  })
+
+  it('不同 source 独立去重；普通事件不受抑制', async () => {
     const bark = new BarkNotifier(() => 'https://api.day.app/key')
     const hub = new AlertHub([bark])
-    await hub.send('backup_failed', '1')
-    await hub.send('backup_failed', '2')
-    await hub.send('test', '测试')
-    await hub.send('backup_failed', '3')
-    expect(fetchUrl(3)).toContain('level=critical')
+    await hub.send('backup_failed', 'a', 'backup:p1')
+    await hub.send('backup_failed', 'b', 'backup:p2') // 另一档案首次失败照发
+    await hub.send('backup_failed', 'c') // 无 source 聚合到全局键，首封照发
+    await hub.send('quota_pruned', '裁剪提示', 'quota:t1:p1')
+    expect(fetchMock).toHaveBeenCalledTimes(4)
+  })
+
+  it('test 事件直接分发且不改变失败去重状态', async () => {
+    const bark = new BarkNotifier(() => 'https://api.day.app/key')
+    const hub = new AlertHub([bark])
+    await hub.send('backup_failed', '1', 'backup:p1')
+    await hub.send('test', '测试', 'test:ui')
+    await hub.send('backup_failed', '2', 'backup:p1')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(decodeURIComponent(fetchUrl(1))).toContain('测试')
   })
 
   it('未配置通道不分发（结果里不出现）', async () => {

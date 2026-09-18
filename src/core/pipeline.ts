@@ -9,7 +9,7 @@ import { pack } from './packer.js'
 import { putFile, listFiles, deleteFile } from './webdav.js'
 
 export interface NotifySink {
-  send(event: string, message: string): Promise<unknown>
+  send(event: string, message: string, source?: string): Promise<unknown>
 }
 
 export interface PipelineDeps {
@@ -135,6 +135,7 @@ export class Pipeline {
             await this.deps.notify.send(
               'quota_pruned',
               `[AutoBackup] ${t.name}/${profile.id}: 容量/份数触发裁剪，删除 ${pruned.deleted} 个旧备份（保 ${pruned.kept} 份）`,
+              `quota:${t.id}:${profile.id}`,
             )
           }
         } catch (err) {
@@ -142,6 +143,7 @@ export class Pipeline {
           await this.deps.notify.send(
             'backup_failed',
             `[AutoBackup] ${t.name}/${profile.id}: 保留裁剪失败（备份本体已成功）：${err instanceof Error ? err.message : String(err)}`,
+            `retention:${t.id}:${profile.id}`,
           )
         }
       }
@@ -162,11 +164,15 @@ export class Pipeline {
         if (cur) store.upsertProfile({ ...cur, lastRunAt: finishedAt })
       }
 
-      if (!allOk) {
+      if (allOk) {
+        // 成功静默，仅复位 AlertHub 的失败去重状态（下轮再失败时恢复首次告警语义）
+        await this.deps.notify.send('backup_ok', `[AutoBackup] ✅ ${profile.name} 备份成功`, `backup:${profile.id}`)
+      } else {
         const failed = pushes.filter((p) => p.status === 'failed')
         await this.deps.notify.send(
           'backup_failed',
           `[AutoBackup] ❌ ${profile.name} 备份推送失败：${failed.map((p) => p.targetId).join(', ')}（快照本地已保存）`,
+          `backup:${profile.id}`,
         )
       }
 
@@ -183,7 +189,7 @@ export class Pipeline {
         durationMs: Date.now() - new Date(startedAt).getTime(),
         error: message,
       })
-      await this.deps.notify.send('backup_failed', `[AutoBackup] ❌ ${profile.name} 备份失败：${message}`)
+      await this.deps.notify.send('backup_failed', `[AutoBackup] ❌ ${profile.name} 备份失败：${message}`, `backup:${profile.id}`)
       const result = store.getRun(runId)
       if (!result) throw new Error('run vanished after failure')
       return result
@@ -250,6 +256,7 @@ export class Pipeline {
         await this.deps.notify.send(
           'backup_failed',
           `[AutoBackup] ⚠️ ${run.profileId} 上次备份进程中断，本地 artifact 已保留（sha256 在案），可手动重跑`,
+          `backup:${run.profileId}`,
         )
       }
     }

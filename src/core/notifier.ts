@@ -18,14 +18,22 @@ export interface AlertChannel {
   lastError?: string
 }
 
-/** 连续 N 次失败升级 critical（Bark 持续响铃 / 邮件高优先级） */
-const CRITICAL_AFTER = 3
+/** 同一持续故障在窗口内只投递一封；窗口到期仍未恢复则 critical 重申（防失败风暴轰炸） */
+const RE_ALERT_INTERVAL_MS = 2 * 3600 * 1000
+
+interface AlertState {
+  failing: boolean
+  lastAlertedAt: number
+}
 
 export class AlertHub {
-  private consecutiveFailures = 0
+  private readonly states = new Map<string, AlertState>()
   readonly channels: readonly AlertChannel[]
 
-  constructor(channels: AlertChannel[]) {
+  constructor(
+    channels: AlertChannel[],
+    private readonly opts: { reAlertAfterMs?: number } = {},
+  ) {
     this.channels = channels
   }
 
@@ -35,12 +43,31 @@ export class AlertHub {
 
   /**
    * 分发一个告警事件，返回各已配置通道的投递结果（未配置通道不出现在结果里）。
+   * source 是故障归属键（如 profileId）：同键持续失败在去重窗口内静默，超窗重申 critical；
+   * backup_ok 只复位不投递（成功静默）；普通事件直接分发，不受去重影响。
    * 签名兼容 pipeline 的 NotifySink（调用方 await 后忽略返回值）。
    */
-  async send(event: string, message: string): Promise<Record<string, boolean>> {
-    if (event === 'backup_failed' || event === 'auth_failed') this.consecutiveFailures++
-    else if (event === 'backup_ok') this.consecutiveFailures = 0
-    const level: AlertLevel = this.consecutiveFailures >= CRITICAL_AFTER ? 'critical' : 'active'
+  async send(event: string, message: string, source?: string): Promise<Record<string, boolean>> {
+    if (event === 'backup_ok') {
+      this.states.set(source ?? event, { failing: false, lastAlertedAt: 0 })
+      return {}
+    }
+    if (event !== 'backup_failed' && event !== 'auth_failed') {
+      return this.dispatch(event, message, 'active')
+    }
+    const key = source ?? event
+    const now = Date.now()
+    const st = this.states.get(key) ?? { failing: false, lastAlertedAt: 0 }
+    const reAlertAfterMs = this.opts.reAlertAfterMs ?? RE_ALERT_INTERVAL_MS
+    if (st.failing && now - st.lastAlertedAt < reAlertAfterMs) {
+      return {} // 同故障仍处于去重窗口：静默，不打扰
+    }
+    const level: AlertLevel = st.failing ? 'critical' : 'active'
+    this.states.set(key, { failing: true, lastAlertedAt: now })
+    return this.dispatch(event, message, level)
+  }
+
+  private async dispatch(event: string, message: string, level: AlertLevel): Promise<Record<string, boolean>> {
     const results: Record<string, boolean> = {}
     for (const ch of this.channels) {
       if (!ch.isConfigured()) continue
