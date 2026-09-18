@@ -3,8 +3,8 @@ import type { Secrets } from './secrets.js'
 /**
  * 告警体系：AlertHub 统一分发（失败必告警，成功静默）。
  * 通道：Bark(iOS 推送) + Email(SMTP)，各自独立配置、独立成败、互不阻塞。
- * 连续失败计数上收 Hub（防各通道分别计数漂移），level 一次计算分发全部通道。
- * 通道一律懒读配置（闭包读 Secrets）——UI 保存后免重启热生效。
+ * 失败通知按 source 键 + 自然日去重：同一故障当天只投递首封，重试失败当天静默；
+ * 跨天后再次失败重新告警。通道一律懒读配置（闭包读 Secrets）——UI 保存后免重启热生效。
  */
 
 export type AlertLevel = 'active' | 'critical'
@@ -18,21 +18,21 @@ export interface AlertChannel {
   lastError?: string
 }
 
-/** 同一持续故障在窗口内只投递一封；窗口到期仍未恢复则 critical 重申（防失败风暴轰炸） */
-const RE_ALERT_INTERVAL_MS = 2 * 3600 * 1000
-
-interface AlertState {
-  failing: boolean
-  lastAlertedAt: number
+/** 本地自然日键（YYYY-MM-DD），失败去重的窗口边界 */
+function localDayKey(d: Date): string {
+  const mm = String(d.getMonth() + 1).padStart(2, '0')
+  const dd = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${mm}-${dd}`
 }
 
 export class AlertHub {
-  private readonly states = new Map<string, AlertState>()
+  /** source → 最近一次发出失败通知的自然日（当天已发过则不再发） */
+  private readonly lastAlertedDay = new Map<string, string>()
   readonly channels: readonly AlertChannel[]
 
   constructor(
     channels: AlertChannel[],
-    private readonly opts: { reAlertAfterMs?: number } = {},
+    private readonly opts: { now?: () => Date } = {},
   ) {
     this.channels = channels
   }
@@ -43,28 +43,25 @@ export class AlertHub {
 
   /**
    * 分发一个告警事件，返回各已配置通道的投递结果（未配置通道不出现在结果里）。
-   * source 是故障归属键（如 profileId）：同键持续失败在去重窗口内静默，超窗重申 critical；
-   * backup_ok 只复位不投递（成功静默）；普通事件直接分发，不受去重影响。
+   * source 是故障归属键（如 profileId）：同一 source 每个自然日只投递首封失败通知，
+   * 当天重试失败全部静默，跨天重置；backup_ok 只静默复位（成功不打扰）；
+   * 普通事件直接分发，不受去重影响。
    * 签名兼容 pipeline 的 NotifySink（调用方 await 后忽略返回值）。
    */
   async send(event: string, message: string, source?: string): Promise<Record<string, boolean>> {
     if (event === 'backup_ok') {
-      this.states.set(source ?? event, { failing: false, lastAlertedAt: 0 })
-      return {}
+      return {} // 成功静默
     }
     if (event !== 'backup_failed' && event !== 'auth_failed') {
       return this.dispatch(event, message, 'active')
     }
     const key = source ?? event
-    const now = Date.now()
-    const st = this.states.get(key) ?? { failing: false, lastAlertedAt: 0 }
-    const reAlertAfterMs = this.opts.reAlertAfterMs ?? RE_ALERT_INTERVAL_MS
-    if (st.failing && now - st.lastAlertedAt < reAlertAfterMs) {
-      return {} // 同故障仍处于去重窗口：静默，不打扰
+    const today = localDayKey((this.opts.now ?? (() => new Date()))())
+    if (this.lastAlertedDay.get(key) === today) {
+      return {} // 当天已告警过该故障：重试失败不再打扰
     }
-    const level: AlertLevel = st.failing ? 'critical' : 'active'
-    this.states.set(key, { failing: true, lastAlertedAt: now })
-    return this.dispatch(event, message, level)
+    this.lastAlertedDay.set(key, today)
+    return this.dispatch(event, message, 'active')
   }
 
   private async dispatch(event: string, message: string, level: AlertLevel): Promise<Record<string, boolean>> {

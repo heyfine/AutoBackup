@@ -3,9 +3,9 @@ import { AlertHub, BarkNotifier, EmailNotifier, emailConfigFromSecrets, normaliz
 import type { Secrets } from './secrets.js'
 
 /**
- * 告警体系回归（2026-09-12 双通道改造 + 2026-09-18 失败去重）。
- * 守护：①懒读配置（UI 保存免重启热生效）②同故障去重窗口内只投递首封，超窗 critical 重申
- * ③backup_ok 静默复位（成功不打扰，下轮失败恢复首次告警语义）④通道故障隔离
+ * 告警体系回归（2026-09-12 双通道改造 + 2026-09-18 失败去重，用户拍板改为自然日窗口）。
+ * 守护：①懒读配置（UI 保存免重启热生效）②同一故障当天只投递首封，重试失败静默
+ * ③跨天重置重新告警；backup_ok 静默且不重置当天已发事实 ④通道故障隔离
  * ⑤未配置通道不分发 ⑥test 事件直接分发不受抑制。
  */
 
@@ -60,28 +60,32 @@ describe('BarkNotifier（level 由 Hub 传入）', () => {
 })
 
 describe('AlertHub 分发与失败去重', () => {
-  it('同故障去重窗口内只投递一封；backup_ok 复位后可再次投递 active', async () => {
+  it('同一故障当天只投递首封，重试失败静默；跨天重置重新告警', async () => {
+    let fakeNow = new Date('2026-09-18T09:00:00')
     const bark = new BarkNotifier(() => 'https://api.day.app/key')
-    const hub = new AlertHub([bark])
+    const hub = new AlertHub([bark], { now: () => fakeNow })
     await hub.send('backup_failed', '1', 'backup:p1')
     await hub.send('backup_failed', '2', 'backup:p1')
     await hub.send('backup_failed', '3', 'backup:p1')
     expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(fetchUrl(0)).toContain('level=active')
-    await hub.send('backup_ok', 'ok', 'backup:p1')
+    fakeNow = new Date('2026-09-19T00:00:00') // 跨天
     await hub.send('backup_failed', '4', 'backup:p1')
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(fetchUrl(1)).toContain('level=active')
   })
 
-  it('持续失败超过重申窗口 → critical 重申', async () => {
+  it('backup_ok 静默且不重置当天已发事实（当天仍只一封）', async () => {
+    let fakeNow = new Date('2026-09-18T09:00:00')
     const bark = new BarkNotifier(() => 'https://api.day.app/key')
-    const hub = new AlertHub([bark], { reAlertAfterMs: 50 })
+    const hub = new AlertHub([bark], { now: () => fakeNow })
     await hub.send('backup_failed', '1', 'backup:p1')
-    await new Promise((r) => setTimeout(r, 80))
+    await hub.send('backup_ok', 'ok', 'backup:p1')
     await hub.send('backup_failed', '2', 'backup:p1')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    fakeNow = new Date('2026-09-19T00:00:00')
+    await hub.send('backup_failed', '3', 'backup:p1')
     expect(fetchMock).toHaveBeenCalledTimes(2)
-    expect(fetchUrl(1)).toContain('level=critical')
   })
 
   it('不同 source 独立去重；普通事件不受抑制', async () => {
