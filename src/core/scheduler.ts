@@ -2,11 +2,16 @@ import type { Store } from '../store/db.js'
 import type { AppProfile, ScheduleSpec } from '../types.js'
 import type { Pipeline } from './pipeline.js'
 
+/** 失败重试间隔（2026-09-18 用户拍板）：最近一次失败后固定 6h 再试 */
+const FAILURE_RETRY_MS = 6 * 3600 * 1000
+
 /**
  * 调度器：每 30s tick。
  * 频率模型（产品化，用户确认）：
  *  - daily: 每天 HH:mm 执行（错过窗口 5 分钟内补跑）
  *  - interval: 每隔 N 小时执行（基于 lastRunAt 推算）
+ * 失败重试（2026-09-18 用户拍板）：最近一次 run 失败后，固定 6 小时后重试，
+ * 不再随 30s tick 风暴重跑；手动「立即备份」不受此限制。
  * 档案可绑定指定目标（targetIds 空=全部启用目标）；keep 为档案级保留份数。
  * 全局并发 = 1；每档案互斥。
  */
@@ -30,6 +35,12 @@ export class Scheduler {
 
   /** 推算某档案下次应执行时刻（ms）； overdue = now >= next */
   nextRunAt(p: AppProfile, now = Date.now()): number {
+    const lastRun = this.store.listRuns(p.id, 1)[0]
+    if (lastRun?.status === 'failed') {
+      // 失败重试固定 6h：从失败结束时刻起算，无 finishedAt 时退回开始时刻
+      const failedAt = lastRun.finishedAt ? new Date(lastRun.finishedAt).getTime() : new Date(lastRun.startedAt).getTime()
+      return failedAt + FAILURE_RETRY_MS
+    }
     const last = p.lastRunAt ? new Date(p.lastRunAt).getTime() : 0
     const s: ScheduleSpec = p.schedule
     if (s.mode === 'interval') {
