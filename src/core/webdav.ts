@@ -28,6 +28,70 @@ export interface WebdavCreds {
   password: string
 }
 
+/** 递归解包 undici fetch 错误链，取最底层 cause（含 code 的网络错误） */
+function findRootCause(err: unknown): unknown {
+  let cur: unknown = err
+  const seen = new Set<unknown>()
+  while (cur && typeof cur === 'object' && 'cause' in cur && !seen.has(cur)) {
+    seen.add(cur)
+    cur = (cur as { cause?: unknown }).cause
+  }
+  return cur
+}
+
+/** 把 fetch/网络层错误翻译成用户可读的中文原因 */
+export function explainFetchError(err: unknown): string {
+  const root = findRootCause(err)
+  const code = (root as NodeJS.ErrnoException | undefined)?.code ?? ''
+  const msg = root instanceof Error ? root.message : String(root)
+  switch (code) {
+    case 'ENOTFOUND':
+      return '无法连接：域名解析失败（DNS 找不到该服务器），请检查 WebDAV 地址是否正确'
+    case 'ECONNREFUSED':
+      return '无法连接：服务器拒绝连接（地址或端口错误，或对方服务未启动）'
+    case 'ETIMEDOUT':
+    case 'UND_ERR_CONNECT_TIMEOUT':
+      return '连接超时：服务器无响应（网络不稳定、被防火墙拦截或服务器过慢）'
+    case 'ECONNRESET':
+    case 'EPIPE':
+    case 'UND_ERR_SOCKET':
+      return '连接被中断：网络不稳定或服务器主动断开了连接'
+    case 'CERT_HAS_EXPIRED':
+      return 'SSL 证书已过期，连接被安全策略拒绝'
+    default:
+      if (/certificate|CERT_|SELF_SIGNED/i.test(msg)) {
+        return 'SSL 证书校验失败（自签名或无效证书），连接被拒绝'
+      }
+      return '无法连接服务器（网络不可达），请检查网络与 WebDAV 地址'
+  }
+}
+
+/** HTTP 状态码 → 中文说明（认证类错误有独立分支，这里覆盖其余常见状态） */
+export function httpStatusText(status: number): string {
+  switch (status) {
+    case 404:
+      return '路径不存在（HTTP 404），请检查 WebDAV 地址是否包含正确的子目录'
+    case 405:
+      return '服务器不支持该操作（HTTP 405），可能未启用 WebDAV'
+    case 409:
+      return '目录冲突（HTTP 409），请稍后重试'
+    case 423:
+      return '目录被锁定（HTTP 423），请稍后重试'
+    case 429:
+      return '请求过于频繁（HTTP 429），被服务器限速，请稍后重试'
+    case 507:
+      return '存储空间不足（HTTP 507），目标配额已满，请清理旧备份或扩容'
+    case 500:
+      return '目标服务器内部错误（HTTP 500），请稍后重试'
+    case 502:
+    case 503:
+    case 504:
+      return `目标服务器异常或维护中（HTTP ${status}），请稍后重试`
+    default:
+      return `目标服务器返回异常状态 HTTP ${status}`
+  }
+}
+
 function authHeader(c: WebdavCreds): string {
   const raw = `${c.username}:${c.password}`
   // btoa 需 latin1；用 Buffer 处理 UTF-8（评审参考实现的 TextEncoder 语义）
@@ -51,13 +115,13 @@ export async function mkdirp(c: WebdavCreds, signal?: AbortSignal): Promise<void
       headers: { Authorization: authHeader(c) },
       signal,
     }).catch((err: unknown) => {
-      throw new WebdavError(`MKCOL connect failed: ${err instanceof Error ? err.message : String(err)}`, undefined, 'connect')
+      throw new WebdavError(explainFetchError(err), undefined, 'connect')
     })
     if (res.status === 401 || res.status === 403) {
-      throw new WebdavError('认证失败，请检查 WebDAV 用户名/密码', res.status, 'auth')
+      throw new WebdavError('认证失败，请检查 WebDAV 用户名/密码（应用专用密码）', res.status, 'auth')
     }
     if (res.status !== 201 && res.status !== 405 && res.status !== 409) {
-      throw new WebdavError(`MKCOL 失败：HTTP ${res.status}`, res.status)
+      throw new WebdavError(httpStatusText(res.status), res.status)
     }
   }
 }
@@ -82,10 +146,10 @@ export async function testConnection(c: WebdavCreds, timeoutMs = 15000): Promise
     if (res.status === 401 || res.status === 403) {
       return { ok: false, message: '认证失败，请检查用户名/密码（WebDAV 应用专用密码）' }
     }
-    return { ok: false, message: `WebDAV 服务器返回 ${res.status}` }
+    return { ok: false, message: httpStatusText(res.status) }
   } catch (err) {
     if (err instanceof WebdavError) return { ok: false, message: err.message }
-    return { ok: false, message: `无法连接：${err instanceof Error ? err.message : String(err)}` }
+    return { ok: false, message: explainFetchError(err) }
   }
 }
 
@@ -116,17 +180,18 @@ export async function putFile(
       signal: controller.signal,
     } as RequestInit)
     if (res.status === 401 || res.status === 403) {
-      throw new WebdavError('认证失败', res.status, 'auth')
+      throw new WebdavError('认证失败，请检查 WebDAV 用户名/密码（应用专用密码）', res.status, 'auth')
     }
     if (!res.ok) {
-      throw new WebdavError(`上传失败：HTTP ${res.status}`, res.status)
+      throw new WebdavError(httpStatusText(res.status), res.status)
     }
     return { bytesSent: s.size }
   } catch (err) {
     if (controller.signal.aborted) {
       throw new WebdavError(`上传超时（>${opts?.timeoutMin ?? 30} 分钟）`, undefined, 'connect')
     }
-    throw err
+    if (err instanceof WebdavError) throw err
+    throw new WebdavError(explainFetchError(err), undefined, 'connect')
   } finally {
     clearTimeout(timer)
     body.destroy()
@@ -141,18 +206,26 @@ export interface RemoteFile {
 }
 
 export async function listFiles(c: WebdavCreds, timeoutMs = 30000): Promise<RemoteFile[]> {
-  const res = await fetch(joinUrl(c.url), {
-    method: 'PROPFIND',
-    headers: {
-      Authorization: authHeader(c),
-      Depth: '1',
-      'Content-Type': 'application/xml',
-    },
-    body: '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/><d:getlastmodified/><d:resourcetype/></d:prop></d:propfind>',
-    signal: AbortSignal.timeout(timeoutMs),
-  })
+  let res: Response
+  try {
+    res = await fetch(joinUrl(c.url), {
+      method: 'PROPFIND',
+      headers: {
+        Authorization: authHeader(c),
+        Depth: '1',
+        'Content-Type': 'application/xml',
+      },
+      body: '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getcontentlength/><d:getlastmodified/><d:resourcetype/></d:prop></d:propfind>',
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+  } catch (err) {
+    throw new WebdavError(explainFetchError(err), undefined, 'connect')
+  }
   if (!res.ok && res.status !== 207) {
-    throw new WebdavError(`列目录失败：HTTP ${res.status}`, res.status)
+    if (res.status === 401 || res.status === 403) {
+      throw new WebdavError('认证失败，请检查 WebDAV 用户名/密码（应用专用密码）', res.status, 'auth')
+    }
+    throw new WebdavError(httpStatusText(res.status), res.status)
   }
   const xml = await res.text()
   return parsePropfind(xml, c.url)

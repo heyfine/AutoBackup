@@ -18,6 +18,29 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   )
 }
 
+/** 密码输入框：小眼睛切换明文/密文显示 */
+function PasswordInput({ value, onInput, placeholder }: { value: string; onInput: (v: string) => void; placeholder?: string }) {
+  const [show, setShow] = useState(false)
+  return (
+    <span class="pwd-wrap">
+      <input
+        type={show ? 'text' : 'password'}
+        value={value}
+        onInput={(e) => onInput((e.target as HTMLInputElement).value)}
+        placeholder={placeholder}
+      />
+      <button
+        type="button"
+        class="pwd-toggle"
+        title={show ? '隐藏密码' : '显示密码'}
+        onClick={() => setShow(!show)}
+      >
+        {show ? '🙈' : '👁'}
+      </button>
+    </span>
+  )
+}
+
 interface ProfilePart {
   kind: 'sqlite' | 'mariadb' | 'postgres' | 'directory' | 'config'
   label: string
@@ -746,8 +769,8 @@ function Targets() {
   const [targets, setTargets] = useState<Target[]>([])
   const [editing, setEditing] = useState<Partial<Target> & { password?: string } | null>(null)
   const [testing, setTesting] = useState<string | null>(null)
-  const [testResult, setTestResult] = useState<Record<string, string>>({})
-  const [msg, setMsg] = useState('')
+  const [testResult, setTestResult] = useState<Record<string, { ok: boolean; message: string }>>({})
+  const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null)
 
   const load = () => api<{ targets: Target[] }>('/api/targets').then((r) => setTargets(r.targets))
   useEffect(() => {
@@ -756,14 +779,14 @@ function Targets() {
 
   const save = async () => {
     if (!editing) return
-    setMsg('')
+    setMsg(null)
     try {
       await api('/api/targets', { method: 'POST', body: JSON.stringify(editing) })
-      setMsg('✅ 已保存')
+      setMsg({ ok: true, text: '✅ 已保存' })
       setEditing(null)
       await load()
     } catch (ex) {
-      setMsg(`❌ ${ex instanceof Error ? ex.message : String(ex)}`)
+      setMsg({ ok: false, text: `❌ ${ex instanceof Error ? ex.message : String(ex)}` })
     }
   }
 
@@ -774,9 +797,9 @@ function Targets() {
         method: 'POST',
         body: JSON.stringify({ url: t.url, username: t.username, password: t.password, targetId: t.id }),
       })
-      setTestResult((s) => ({ ...s, [t.id ?? 'form']: `${r.ok ? '✅' : '❌'} ${r.message}` }))
+      setTestResult((s) => ({ ...s, [t.id ?? 'form']: { ok: r.ok, message: `${r.ok ? '✅' : '❌'} ${r.message}` } }))
     } catch (ex) {
-      setTestResult((s) => ({ ...s, [t.id ?? 'form']: `❌ ${ex instanceof Error ? ex.message : String(ex)}` }))
+      setTestResult((s) => ({ ...s, [t.id ?? 'form']: { ok: false, message: `❌ ${ex instanceof Error ? ex.message : String(ex)}` } }))
     } finally {
       setTesting(null)
     }
@@ -789,9 +812,9 @@ function Targets() {
         method: 'POST',
         body: JSON.stringify({ targetId: id }),
       })
-      setTestResult((s) => ({ ...s, [id]: `${r.ok ? '✅' : '❌'} ${r.message}` }))
+      setTestResult((s) => ({ ...s, [id]: { ok: r.ok, message: `${r.ok ? '✅' : '❌'} ${r.message}` } }))
     } catch (ex) {
-      setTestResult((s) => ({ ...s, [id]: `❌ ${ex instanceof Error ? ex.message : String(ex)}` }))
+      setTestResult((s) => ({ ...s, [id]: { ok: false, message: `❌ ${ex instanceof Error ? ex.message : String(ex)}` } }))
     } finally {
       setTesting(null)
     }
@@ -818,7 +841,7 @@ function Targets() {
             WebDAV 地址 <input value={t.url ?? ''} onInput={(e) => upd({ url: (e.target as HTMLInputElement).value })} placeholder="https://app.koofr.net/dav/Koofr/autobackup" />
           </label>
           <label>用户名 <input value={t.username ?? ''} onInput={(e) => upd({ username: (e.target as HTMLInputElement).value })} /></label>
-          <label>密码 <input type="password" value={t.password ?? ''} onInput={(e) => upd({ password: (e.target as HTMLInputElement).value })} placeholder={t.hasPassword ? '••••••（留空保持不变）' : '应用专用密码'} /></label>
+          <label>密码 <PasswordInput value={t.password ?? ''} onInput={(v) => upd({ password: v })} placeholder={t.hasPassword ? '••••••（留空保持不变）' : '应用专用密码'} /></label>
           <label>保留份数（默认） <input type="number" min={3} max={365} value={t.keep ?? 7} onInput={(e) => upd({ keep: Number((e.target as HTMLInputElement).value) })} /></label>
           <label>容量配额 GB（可选，触发自动裁剪） <input type="number" min={0} value={t.capacityQuotaMb ? (t.capacityQuotaMb / 1024).toFixed(0) : ''} onInput={(e) => upd({ capacityQuotaMb: Number((e.target as HTMLInputElement).value) * 1024 || undefined })} placeholder="如 10" /></label>
           <label>上传超时（分钟） <input type="number" min={5} max={240} value={t.timeoutMin ?? 30} onInput={(e) => upd({ timeoutMin: Number((e.target as HTMLInputElement).value) })} /></label>
@@ -826,7 +849,10 @@ function Targets() {
         <label class="check-item">
           <input type="checkbox" checked={t.allowUnencrypted ?? true} onChange={(e) => upd({ allowUnencrypted: (e.target as HTMLInputElement).checked })} /> 允许未加密备份（关闭则只收加密包，强烈建议敏感服务器关闭）
         </label>
-        {testResult[t.id ?? 'form'] && <div class="banner-ok">{testResult[t.id ?? 'form']}</div>}
+        {(() => {
+          const r = testResult[t.id ?? 'form']
+          return r && <div class={r.ok ? 'banner-ok' : 'banner-err'}>{r.message}</div>
+        })()}
         <div class="btn-row">
           <button class="ghost" disabled={testing === 'form'} onClick={() => test(t)}>测试连接</button>
           <button onClick={save}>保存</button>
@@ -838,7 +864,7 @@ function Targets() {
 
   return (
     <div>
-      {msg && <div class="banner-ok">{msg}</div>}
+      {msg && <div class={msg.ok ? 'banner-ok' : 'banner-err'}>{msg.text}</div>}
       <div class="toolbar">
         <button onClick={() => setEditing({ enabled: true, keep: 7, timeoutMin: 30, allowUnencrypted: true })}>＋ 添加 WebDAV 目标</button>
       </div>
@@ -851,7 +877,10 @@ function Targets() {
             {!t.allowUnencrypted && <span class="badge">仅加密</span>}
           </div>
           <div class="card-meta">{t.url} · 保留 {t.keep} 份{t.capacityQuotaMb ? ` · 配额 ${(t.capacityQuotaMb / 1024).toFixed(0)}GB` : ''} · 超时 {t.timeoutMin}min</div>
-          {testResult[t.id] && <div class="banner-ok">{testResult[t.id]}</div>}
+          {(() => {
+          const r = testResult[t.id]
+          return r && <div class={r.ok ? 'banner-ok' : 'banner-err'}>{r.message}</div>
+        })()}
           <div class="btn-row">
             <button class="ghost sm" disabled={testing === t.id} onClick={() => testSaved(t.id)}>{testing === t.id ? '测试中…' : '测试连接'}</button>
             <button class="ghost sm" onClick={() => setEditing(t)}>编辑</button>

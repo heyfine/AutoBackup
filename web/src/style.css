@@ -188,6 +188,25 @@ input {
 }
 input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
+.pwd-wrap { position: relative; display: block; }
+.pwd-wrap input { width: 100%; padding-right: 40px; }
+.pwd-toggle {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px;
+  opacity: 0.65;
+}
+.pwd-toggle:hover { opacity: 1; }
+
+.form-grid label.full .pwd-wrap input, label.full .pwd-wrap input { width: 100%; }
+
 .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; }
 .login-card {
   background: var(--card);
