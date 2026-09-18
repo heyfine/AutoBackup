@@ -1,6 +1,12 @@
 import { createReadStream, type ReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
+import { setDefaultAutoSelectFamily } from 'node:net'
 import type { ReadableStream as NodeWebReadable } from 'node:stream/web'
+
+// 新服务器无 IPv6 路由；Node 22 默认 autoSelectFamily 会先试 AAAA 的 IPv6 连接，
+// 黑洞网络导致 fetch/https 全部 ETIMEDOUT（curl 有独立回退不受影响）。
+// 禁用地址族自动选择后按系统顺序走 IPv4，WebDAV 连接恢复。必须在任何出站连接前设置。
+setDefaultAutoSelectFamily(false)
 
 /**
  * WebDAV 客户端（语义继承 sales record webdav.ts 实测经验 + 流式改造）：
