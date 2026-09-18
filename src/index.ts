@@ -44,8 +44,8 @@ async function bootstrap(): Promise<AppCtx> {
   const secretsPath = resolveSecretsPath(homeDir)
   const secrets = new Secrets(secretsPath)
   const hub = new AlertHub([
-    new BarkNotifier(() => secrets.getOptional('BARK_URL')),
-    new EmailNotifier(() => emailConfigFromSecrets(secrets)),
+    new BarkNotifier(() => secrets.getOptional('BARK_URL'), 'server', () => secrets.getOptional('NOTIFY_BARK') !== '0'),
+    new EmailNotifier(() => emailConfigFromSecrets(secrets), 'server', undefined, () => secrets.getOptional('NOTIFY_EMAIL') !== '0'),
   ])
   const pipeline = new Pipeline({ store, secrets, homeDir, notify: hub, toolVersion: TOOL_VERSION })
   const scheduler = new Scheduler(store, pipeline)

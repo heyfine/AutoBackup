@@ -88,10 +88,12 @@ export class BarkNotifier implements AlertChannel {
   constructor(
     private readonly getBarkUrl: () => string | undefined,
     private readonly source: 'local' | 'server' = 'server',
+    /** 用户开关：false = 保留配置但不参与自动告警（测试按钮仍可手动发） */
+    private readonly isEnabled: () => boolean = () => true,
   ) {}
 
   isConfigured(): boolean {
-    return !!this.getBarkUrl()
+    return this.isEnabled() && !!this.getBarkUrl()
   }
 
   async send(event: string, message: string, level: AlertLevel): Promise<boolean> {
@@ -177,10 +179,12 @@ export class EmailNotifier implements AlertChannel {
     private readonly getConfig: () => EmailConfig | null,
     private readonly source: 'local' | 'server' = 'server',
     private readonly makeTransport: EmailTransportMaker = nodemailerTransport,
+    /** 用户开关：false = 保留配置但不参与自动告警（测试按钮仍可手动发） */
+    private readonly isEnabled: () => boolean = () => true,
   ) {}
 
   isConfigured(): boolean {
-    return this.getConfig() !== null
+    return this.isEnabled() && this.getConfig() !== null
   }
 
   async send(event: string, message: string, level: AlertLevel): Promise<boolean> {

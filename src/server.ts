@@ -558,6 +558,7 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     const cfg = emailConfigFromSecrets(secrets)
     return {
       configured: cfg !== null,
+      enabled: secrets.getOptional('NOTIFY_EMAIL') !== '0',
       host: normalizeSmtpHost(secrets.getOptional('SMTP_HOST') ?? ''),
       port: Number(secrets.getOptional('SMTP_PORT') ?? '465') || 465,
       user: secrets.getOptional('SMTP_USER') ?? '',
@@ -568,15 +569,26 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
 
   app.get('/api/notify/status', async () => ({
     barkConfigured: secrets.has('BARK_URL'),
+    barkEnabled: secrets.getOptional('NOTIFY_BARK') !== '0',
     newAppNotify: secrets.getOptional('NOTIFY_NEW_APP') !== '0',
     email: emailView(),
   }))
 
-  /** 告警偏好：newAppNotify = 「发现新应用入档」是否通知（关=只静默入档，不发 Bark/邮件） */
+  /** 告警偏好：newAppNotify = 发现新应用是否通知；barkEnabled/emailEnabled = 失败告警通道开关（'0'=关，缺省开） */
   app.post('/api/notify/prefs', async (req) => {
-    const { newAppNotify } = (req.body ?? {}) as { newAppNotify?: boolean }
+    const { newAppNotify, barkEnabled, emailEnabled } = (req.body ?? {}) as {
+      newAppNotify?: boolean
+      barkEnabled?: boolean
+      emailEnabled?: boolean
+    }
     if (typeof newAppNotify === 'boolean') upsertSecret('NOTIFY_NEW_APP', newAppNotify ? '1' : '0')
-    return { newAppNotify: secrets.getOptional('NOTIFY_NEW_APP') !== '0' }
+    if (typeof barkEnabled === 'boolean') upsertSecret('NOTIFY_BARK', barkEnabled ? '1' : '0')
+    if (typeof emailEnabled === 'boolean') upsertSecret('NOTIFY_EMAIL', emailEnabled ? '1' : '0')
+    return {
+      newAppNotify: secrets.getOptional('NOTIFY_NEW_APP') !== '0',
+      barkEnabled: secrets.getOptional('NOTIFY_BARK') !== '0',
+      emailEnabled: secrets.getOptional('NOTIFY_EMAIL') !== '0',
+    }
   })
 
   app.post('/api/notify/bark', async (req) => {
@@ -588,7 +600,7 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
   /** 发一条测试推送到 Bark，验证告警通道真实可达（失败必告警的闭环入口） */
   app.post('/api/notify/test', async () => {
     const ch = notify.channel('bark')
-    if (!ch || !ch.isConfigured()) {
+    if (!ch || !secrets.has('BARK_URL')) {
       return { sent: false, error: '未配置 BARK_URL' }
     }
     const sent = await ch.send('test', '✅ 测试通知：AutoBackup 告警通道已连通', 'active')
@@ -616,7 +628,7 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
 
   app.post('/api/notify/email/test', async () => {
     const ch = notify.channel('email')
-    if (!ch || !ch.isConfigured()) {
+    if (!ch || !emailConfigFromSecrets(secrets)) {
       return { sent: false, error: 'SMTP 配置不完整（服务器/发件邮箱/授权码/收件邮箱 均必填）' }
     }
     const sent = await ch.send('test', '✅ 测试邮件：AutoBackup 邮箱告警通道已连通', 'active')

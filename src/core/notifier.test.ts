@@ -57,6 +57,12 @@ describe('BarkNotifier（level 由 Hub 传入）', () => {
     await expect(n.send('backup_failed', 'b', 'active')).resolves.toBe(false)
     expect(n.lastError).toContain('410')
   })
+
+  it('开关关闭：URL 已配置也不参与自动告警（isConfigured false），但手动 send 仍可用', async () => {
+    const n = new BarkNotifier(() => 'https://api.day.app/key', 'server', () => false)
+    expect(n.isConfigured()).toBe(false)
+    await expect(n.send('backup_failed', 'x', 'active')).resolves.toBe(true)
+  })
 })
 
 describe('AlertHub 分发与失败去重', () => {
@@ -144,6 +150,14 @@ describe('EmailNotifier（注入 fake transport）', () => {
     expect(n.isConfigured()).toBe(false)
     await expect(n.send('backup_failed', 'x', 'active')).resolves.toBe(false)
     expect(make).not.toHaveBeenCalled()
+  })
+
+  it('开关关闭：配置完整也不参与自动告警（isConfigured false），但手动 send 仍可用', async () => {
+    const make = vi.fn(async (_cfg: EmailConfig) => ({ sendMail: async () => ({}), close: () => {} }))
+    const n = new EmailNotifier(() => emailCfg(), 'server', make, () => false)
+    expect(n.isConfigured()).toBe(false)
+    await expect(n.send('backup_failed', 'x', 'active')).resolves.toBe(true)
+    expect(make).toHaveBeenCalledTimes(1)
   })
 
   it('完整配置：host/port/secure/auth 传给 transport；critical 主题🚨+高优先级头；正文含事件；用完关连接', async () => {

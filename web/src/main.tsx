@@ -972,21 +972,37 @@ function NewAppNotifyCard() {
 
 function BarkCard() {
   const [configured, setConfigured] = useState<boolean | null>(null)
+  const [enabled, setEnabled] = useState<boolean | null>(null)
   const [url, setUrl] = useState('')
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null)
   const [busy, setBusy] = useState(false)
 
   async function refresh() {
     try {
-      const r = await api<{ barkConfigured: boolean }>('/api/notify/status')
+      const r = await api<{ barkConfigured: boolean; barkEnabled: boolean }>('/api/notify/status')
       setConfigured(r.barkConfigured)
+      setEnabled(r.barkEnabled)
     } catch {
       setConfigured(false)
+      setEnabled(true)
     }
   }
   useEffect(() => {
     void refresh()
   }, [])
+
+  async function toggleBark(v: boolean) {
+    setBusy(true)
+    try {
+      const r = await api<{ barkEnabled: boolean }>('/api/notify/prefs', {
+        method: 'POST',
+        body: JSON.stringify({ barkEnabled: v }),
+      })
+      setEnabled(r.barkEnabled)
+    } finally {
+      setBusy(false)
+    }
+  }
 
   async function saveBark() {
     if (!url.trim()) return
@@ -1026,10 +1042,14 @@ function BarkCard() {
         ) : (
           <span class="badge warn">未配置 —— 失败不会推送</span>
         )}
+        <span style="margin-left:auto">
+          <Toggle checked={enabled ?? true} onChange={(v) => void toggleBark(v)} />
+        </span>
       </div>
       <div class="card-meta muted">
-        任何一次备份失败都会推送到手机（成功静默不打扰；连续 3 次失败自动升级为持续响铃）。
+        任何一次备份失败都会推送到手机（成功静默不打扰；持续失败每天最多一封提醒）。
         安装 iOS App <a href="https://apps.apple.com/app/bark/id1403753865">Bark</a> 获取推送 URL 后填入即可。
+        开关关闭后：备份失败不再推送（配置保留，可随时重新开启；测试通知不受开关影响）。
       </div>
       {notice && <div class={notice.ok ? 'banner-ok' : 'banner-err'}>{notice.text}</div>}
       <div class="cred-form">
@@ -1053,6 +1073,7 @@ function BarkCard() {
 
 interface EmailView {
   configured: boolean
+  enabled: boolean
   host: string
   port: number
   user: string
@@ -1145,6 +1166,16 @@ function EmailCard() {
     })
   }
 
+  async function toggleEmail(v: boolean) {
+    await withBusy(async () => {
+      const r = await api<{ emailEnabled: boolean }>('/api/notify/prefs', {
+        method: 'POST',
+        body: JSON.stringify({ emailEnabled: v }),
+      })
+      setView((cur) => (cur ? { ...cur, enabled: r.emailEnabled } : cur))
+    })
+  }
+
   return (
     <div class="card wide">
       <div class="card-head">
@@ -1156,10 +1187,14 @@ function EmailCard() {
         ) : (
           <span class="badge warn">未配置</span>
         )}
+        <span style="margin-left:auto">
+          <Toggle checked={view?.enabled ?? true} onChange={(v) => void toggleEmail(v)} />
+        </span>
       </div>
       <div class="card-meta muted">
-        与 Bark 并行的第二告警通道：备份失败同时发 email（连续 3 次失败主题带 🚨 高优先级）。
+        与 Bark 并行的第二告警通道：备份失败同时发 email（持续失败每天最多一封提醒）。
         以 QQ 邮箱为例：设置→账号→POP3/SMTP→开启并取<strong>授权码</strong>（不是登录密码），host 填 smtp.qq.com、port 465。
+        开关关闭后：备份失败不再发邮件（配置保留，可随时重新开启；测试邮件不受开关影响）。
       </div>
       {notice && <div class={notice.ok ? 'banner-ok' : 'banner-err'}>{notice.text}</div>}
       <div class="form-grid">
