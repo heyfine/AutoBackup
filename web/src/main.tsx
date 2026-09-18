@@ -1,5 +1,6 @@
 import { render } from 'preact'
 import { useState, useEffect, useRef } from 'preact/hooks'
+import { translateRunError } from './lib/translate'
 import './style.css'
 
 // ---- types（与后端对齐） ----
@@ -402,7 +403,7 @@ function Dashboard() {
                   <span class="muted">从未备份（下次：{scheduleLabel(p.schedule)}）</span>
                 )}
               </div>
-              {last?.error && <div class="card-err">{last.error}</div>}
+              {last?.error && <div class="card-err">{translateRunError(last.error)}</div>}
               <button class="ghost sm" disabled={running === p.id} onClick={() => runNow(p.id)}>
                 {running === p.id ? '备份中…' : '立即备份'}
               </button>
