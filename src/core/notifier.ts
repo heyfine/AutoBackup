@@ -25,6 +25,32 @@ function localDayKey(d: Date): string {
   return `${d.getFullYear()}-${mm}-${dd}`
 }
 
+/** 用户可开关的通知事件（UI「通知偏好」卡与 secrets 键的唯一登记处） */
+export interface NotifyEventPref {
+  event: string
+  /** secrets 键：'0'=关，'1'=开，缺省=defaultOn */
+  key: string
+  defaultOn: boolean
+}
+
+export const NOTIFY_EVENT_PREFS: readonly NotifyEventPref[] = [
+  { event: 'backup_failed', key: 'NOTIFY_BACKUP_FAILED', defaultOn: true },
+  // 用户拍板 2026-09-19：裁剪删除旧备份属常规运维动作，默认不打扰
+  { event: 'quota_pruned', key: 'NOTIFY_QUOTA_PRUNED', defaultOn: false },
+  { event: 'new_app_added', key: 'NOTIFY_NEW_APP', defaultOn: true },
+  { event: 'auto_profile_removed', key: 'NOTIFY_AUTO_REMOVED', defaultOn: true },
+]
+
+/** 读单个事件开关：secrets 缺省走 defaultOn；未登记的事件一律放行（如 test） */
+export function notifyEventEnabled(getOptional: (key: string) => string | undefined, event: string): boolean {
+  const pref = NOTIFY_EVENT_PREFS.find((p) => p.event === event)
+  if (!pref) return true
+  const v = getOptional(pref.key)
+  if (v === '0') return false
+  if (v === '1') return true
+  return pref.defaultOn
+}
+
 export class AlertHub {
   /** source → 最近一次发出失败通知的自然日（当天已发过则不再发） */
   private readonly lastAlertedDay = new Map<string, string>()
@@ -32,7 +58,7 @@ export class AlertHub {
 
   constructor(
     channels: AlertChannel[],
-    private readonly opts: { now?: () => Date } = {},
+    private readonly opts: { now?: () => Date; isEventEnabled?: (event: string) => boolean } = {},
   ) {
     this.channels = channels
   }
@@ -43,14 +69,17 @@ export class AlertHub {
 
   /**
    * 分发一个告警事件，返回各已配置通道的投递结果（未配置通道不出现在结果里）。
+   * isEventEnabled：用户级通知偏好（按事件开关，UI「通知偏好」卡控制）；
    * source 是故障归属键（如 profileId）：同一 source 每个自然日只投递首封失败通知，
-   * 当天重试失败全部静默，跨天重置；backup_ok 只静默复位（成功不打扰）；
-   * 普通事件直接分发，不受去重影响。
+   * 当天重试失败全部静默，跨天重置；backup_ok 只静默复位（成功不打扰）。
    * 签名兼容 pipeline 的 NotifySink（调用方 await 后忽略返回值）。
    */
   async send(event: string, message: string, source?: string): Promise<Record<string, boolean>> {
     if (event === 'backup_ok') {
       return {} // 成功静默
+    }
+    if (this.opts.isEventEnabled && !this.opts.isEventEnabled(event)) {
+      return {} // 用户关闭了该类通知
     }
     if (event !== 'backup_failed' && event !== 'auth_failed') {
       return this.dispatch(event, message, 'active')

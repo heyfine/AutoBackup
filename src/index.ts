@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { Store } from './store/db.js'
 import { Secrets, resolveSecretsPath } from './core/secrets.js'
-import { BarkNotifier, EmailNotifier, emailConfigFromSecrets, AlertHub } from './core/notifier.js'
+import { BarkNotifier, EmailNotifier, emailConfigFromSecrets, AlertHub, notifyEventEnabled } from './core/notifier.js'
 import { Pipeline } from './core/pipeline.js'
 import { Scheduler } from './core/scheduler.js'
 import { TOOL_VERSION } from './core/packer.js'
@@ -46,7 +46,9 @@ async function bootstrap(): Promise<AppCtx> {
   const hub = new AlertHub([
     new BarkNotifier(() => secrets.getOptional('BARK_URL'), 'server', () => secrets.getOptional('NOTIFY_BARK') !== '0'),
     new EmailNotifier(() => emailConfigFromSecrets(secrets), 'server', undefined, () => secrets.getOptional('NOTIFY_EMAIL') !== '0'),
-  ])
+  ], {
+    isEventEnabled: (event) => notifyEventEnabled((k) => secrets.getOptional(k), event),
+  })
   const pipeline = new Pipeline({ store, secrets, homeDir, notify: hub, toolVersion: TOOL_VERSION })
   const scheduler = new Scheduler(store, pipeline)
   return { store, secrets, hub, pipeline, scheduler, homeDir, secretsPath }
@@ -112,7 +114,7 @@ async function main(): Promise<void> {
     }
     case 'scan': {
       const { scanAndRegister, makeLiveDeps } = await import('./core/auto-detect.js')
-      const out = await scanAndRegister(ctx.store, ctx.hub, makeLiveDeps(ctx.secrets))
+      const out = await scanAndRegister(ctx.store, ctx.hub, makeLiveDeps())
       if (out.added.length) console.log(`已入档（开关默认关）：${out.added.join('、')}`)
       if (out.removed.length) console.log(`清理过期自动档案：${out.removed.join('、')}`)
       if (!out.added.length && !out.removed.length) console.log('扫描完成：没有新应用（已有档案未被改动）')
@@ -124,7 +126,7 @@ async function main(): Promise<void> {
       const { startTempCleanupTimer } = await import('./core/temp-cleanup.js')
       const stopCleanup = startTempCleanupTimer(ctx.homeDir)
       const { startAutoDetect, makeLiveDeps } = await import('./core/auto-detect.js')
-      const stopAutoDetect = startAutoDetect(ctx.store, ctx.hub, makeLiveDeps(ctx.secrets))
+      const stopAutoDetect = startAutoDetect(ctx.store, ctx.hub, makeLiveDeps())
       const { startApi } = await import('./server.js')
       const api = await startApi({
         store: ctx.store,

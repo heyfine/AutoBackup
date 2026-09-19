@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { AlertHub, BarkNotifier, EmailNotifier, emailConfigFromSecrets, normalizeSmtpHost, type EmailConfig } from './notifier.js'
+import { AlertHub, BarkNotifier, EmailNotifier, emailConfigFromSecrets, normalizeSmtpHost, notifyEventEnabled, NOTIFY_EVENT_PREFS, type EmailConfig } from './notifier.js'
 import type { Secrets } from './secrets.js'
 
 /**
@@ -112,6 +112,35 @@ describe('AlertHub 分发与失败去重', () => {
     await hub.send('backup_failed', '2', 'backup:p1')
     expect(fetchMock).toHaveBeenCalledTimes(2)
     expect(decodeURIComponent(fetchUrl(1))).toContain('测试')
+  })
+
+  it('isEventEnabled 关闭的事件不投递；未登记事件（test）放行', async () => {
+    const bark = new BarkNotifier(() => 'https://api.day.app/key')
+    const hub = new AlertHub([bark], { isEventEnabled: (e) => e !== 'quota_pruned' })
+    await hub.send('quota_pruned', '裁剪提示', 'quota:t1:p1')
+    expect(fetchMock).not.toHaveBeenCalled()
+    await hub.send('backup_failed', '失败', 'backup:p1')
+    await hub.send('test', '测试', 'test:ui')
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('notifyEventEnabled：quota_pruned 缺省关（用户拍板），显式 1 开；backup_failed 缺省开', () => {
+    const get = (k: string) => ({ NOTIFY_QUOTA_PRUNED: '1', NOTIFY_BACKUP_FAILED: '0' })[k]
+    expect(notifyEventEnabled(() => undefined, 'quota_pruned')).toBe(false)
+    expect(notifyEventEnabled(get, 'quota_pruned')).toBe(true)
+    expect(notifyEventEnabled(() => undefined, 'backup_failed')).toBe(true)
+    expect(notifyEventEnabled(get, 'backup_failed')).toBe(false)
+    expect(notifyEventEnabled(() => undefined, 'unregistered_event')).toBe(true)
+  })
+
+  it('NOTIFY_EVENT_PREFS：四个事件登记齐全，键唯一', () => {
+    expect(NOTIFY_EVENT_PREFS.map((p) => p.event)).toEqual([
+      'backup_failed',
+      'quota_pruned',
+      'new_app_added',
+      'auto_profile_removed',
+    ])
+    expect(new Set(NOTIFY_EVENT_PREFS.map((p) => p.key)).size).toBe(4)
   })
 
   it('未配置通道不分发（结果里不出现）', async () => {

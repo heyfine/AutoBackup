@@ -1,5 +1,4 @@
 import type { Store } from '../store/db.js'
-import type { Secrets } from './secrets.js'
 import type { AppProfile } from '../types.js'
 import type { AlertHub } from './notifier.js'
 import { detectContainers, listRunningContainers, type DetectResult } from './detector.js'
@@ -16,16 +15,16 @@ export const AUTO_PREFIX = 'auto_'
 export interface AutoDetectDeps {
   detect: (coveredContainers: string[], existingPaths: string[]) => Promise<DetectResult>
   runningContainers: () => Promise<Set<string>>
-  /** 「发现新应用」通知开关（懒读 secrets，用户可关）：false 时照常入档，只是不发通知 */
-  notifyEnabled: () => boolean
 }
 
-/** NOTIFY_NEW_APP 缺省=开启（保持默认行为），显式置 '0' 关闭 */
-export function makeLiveDeps(secrets: Secrets): AutoDetectDeps {
+/**
+ * 通知开关统一由 AlertHub 的 isEventEnabled 管理（NOTIFY_NEW_APP / NOTIFY_AUTO_REMOVED），
+ * 本模块只负责无条件上报事件——「是否打扰用户」是分发层的事。
+ */
+export function makeLiveDeps(): AutoDetectDeps {
   return {
     detect: detectContainers,
     runningContainers: listRunningContainers,
-    notifyEnabled: () => secrets.getOptional('NOTIFY_NEW_APP') !== '0',
   }
 }
 
@@ -98,7 +97,7 @@ export async function scanAndRegister(
     store.upsertProfile(draftToProfile(d))
     added.push(`${d.containerName}（${d.confidence === 'high' ? '已识别' : '未识别，按数据目录入档'}）`)
   }
-  if (added.length > 0 && deps.notifyEnabled()) {
+  if (added.length > 0) {
     await hub.send(
       'new_app_added',
       `🆕 检测到新应用并已加入档案（备份开关默认关闭）：${added.join('、')}。请到控制台核对后开启。`,
@@ -115,7 +114,7 @@ export async function scanAndRegister(
       removed.push(p.name)
     }
   }
-  if (removed.length > 0 && deps.notifyEnabled()) {
+  if (removed.length > 0) {
     await hub.send('auto_profile_removed', `🧹 已自动移除未启用的过期档案（容器已消失）：${removed.join('、')}`)
   }
 

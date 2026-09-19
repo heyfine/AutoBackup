@@ -190,6 +190,11 @@ input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 
 .pwd-wrap { position: relative; display: block; }
 .pwd-wrap input { width: 100%; padding-right: 40px; }
+.pref-row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.pref-row:last-of-type { border-bottom: none; }
+.pref-text { flex: 1; }
+.pref-name { font-size: 13px; font-weight: 600; }
+.pref-desc { font-size: 12px; margin-top: 2px; }
 .pwd-toggle {
   position: absolute;
   right: 5px;

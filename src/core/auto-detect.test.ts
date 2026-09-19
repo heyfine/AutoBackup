@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Store } from '../store/db.js'
-import type { AlertHub } from './notifier.js'
+import { AlertHub, type AlertChannel } from './notifier.js'
 import type { DetectedDraft } from '../types.js'
 import { scanAndRegister, type AutoDetectDeps } from './auto-detect.js'
 import { pathOverlaps } from './detector.js'
@@ -12,7 +12,7 @@ import { pathOverlaps } from './detector.js'
  * 自动扫描入档回归（2026-09-12，用户拍板：自动入档但备份开关默认关）。
  * 守护安全线：①创建档案 enabled=false（未确认绝不备份）②绝不覆盖已有档案（含用户编辑）
  * ③僵尸清理仅限 auto_ 前缀+未启用+容器消失 ④用户已开开关的自动档案不删
- * ⑤发现通知可关（关=静默入档，不发通知）。
+ * ⑤事件级通知开关由 AlertHub 统一拦截（本套件用真实 Hub 验证端到端静默）。
  */
 
 let home = ''
@@ -41,12 +41,10 @@ function draft(container: string, over: Partial<DetectedDraft> = {}): DetectedDr
 function deps(
   drafts: DetectedDraft[],
   running: string[],
-  notifyEnabled = true,
 ): AutoDetectDeps {
   return {
     detect: async () => ({ drafts, scanned: drafts.length }),
     runningContainers: async () => new Set(running),
-    notifyEnabled: () => notifyEnabled,
   }
 }
 
@@ -143,22 +141,31 @@ describe('scanAndRegister', () => {
         return { drafts: [], scanned: 0 }
       },
       runningContainers: async () => new Set(['vaultwarden']),
-      notifyEnabled: () => true,
     })
     expect(seenContainers).toContain('vaultwarden') // parts.container 计入
     expect(seenPaths).toContain('/opt/vaultwarden/data/db.sqlite3') // parts.dbPath 计入
     expect(store.getProfile('auto_vaultwarden')).toBeFalsy()
   })
 
-  it('通知开关关闭：照常静默入档，不发任何通知', async () => {
-    const out = await scanAndRegister(store, hub, deps([draft('quiet-app')], ['quiet-app'], false))
+  it('事件级通知开关关闭（AlertHub isEventEnabled）：照常入档/清理，但零投递', async () => {
+    const delivered: string[] = []
+    const spyChannel: AlertChannel = {
+      name: 'spy',
+      isConfigured: () => true,
+      send: async (event: string) => {
+        delivered.push(event)
+        return true
+      },
+    }
+    const blockedHub = new AlertHub([spyChannel], { isEventEnabled: () => false })
+    const out = await scanAndRegister(store, blockedHub, deps([draft('quiet-app')], ['quiet-app']))
     expect(out.added).toHaveLength(1) // 入档不受开关影响
     expect(store.getProfile('auto_quiet-app')?.enabled).toBe(false)
-    expect(hubSend).not.toHaveBeenCalled() // 但通知不发
+    expect(delivered).toEqual([]) // 通知被 Hub 拦截
     // 僵尸清理同理静默
-    const out2 = await scanAndRegister(store, hub, deps([], [], false))
+    const out2 = await scanAndRegister(store, blockedHub, deps([], []))
     expect(out2.removed).toEqual(['quiet-app 数据'])
-    expect(hubSend).not.toHaveBeenCalled()
+    expect(delivered).toEqual([])
   })
 
   it('手动档案（非 auto_ 前缀）永不被清理逻辑触碰', async () => {

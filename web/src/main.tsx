@@ -957,24 +957,42 @@ function AccountCard() {
   )
 }
 
-function NewAppNotifyCard() {
-  const [on, setOn] = useState<boolean | null>(null)
+interface NotifyPrefs {
+  backupFailed: boolean
+  quotaPruned: boolean
+  newAppAdded: boolean
+  autoRemoved: boolean
+}
+
+const NOTIFY_PREF_ROWS: { key: keyof NotifyPrefs; name: string; desc: string }[] = [
+  { key: 'backupFailed', name: '备份失败', desc: '推送失败、快照异常、进程中断恢复、保留裁剪失败——建议保持开启' },
+  { key: 'quotaPruned', name: '容量裁剪提示', desc: '触发保留策略删除旧备份时（默认关，属常规运维动作）' },
+  { key: 'newAppAdded', name: '发现新应用', desc: '自动扫描发现新应用并入档后提醒核对（入档不受开关影响）' },
+  { key: 'autoRemoved', name: '过期档案清理', desc: '容器已消失的未启用自动档案被移除时' },
+]
+
+function NotifyPrefsCard() {
+  const [prefs, setPrefs] = useState<NotifyPrefs | null>(null)
   const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
 
   useEffect(() => {
-    api<{ newAppNotify: boolean }>('/api/notify/status')
-      .then((r) => setOn(r.newAppNotify))
-      .catch(() => setOn(true))
+    api<{ prefs: NotifyPrefs }>('/api/notify/status')
+      .then((r) => setPrefs(r.prefs))
+      .catch(() => setErr('加载失败，请刷新重试'))
   }, [])
 
-  async function toggleTo(v: boolean) {
+  async function setPref(key: keyof NotifyPrefs, v: boolean) {
     setBusy(true)
+    setErr('')
     try {
-      const r = await api<{ newAppNotify: boolean }>('/api/notify/prefs', {
+      const r = await api<{ prefs: NotifyPrefs }>('/api/notify/prefs', {
         method: 'POST',
-        body: JSON.stringify({ newAppNotify: v }),
+        body: JSON.stringify({ [key]: v }),
       })
-      setOn(r.newAppNotify)
+      setPrefs(r.prefs)
+    } catch (ex) {
+      setErr(`保存失败：${ex instanceof Error ? ex.message : String(ex)}`)
     } finally {
       setBusy(false)
     }
@@ -983,18 +1001,26 @@ function NewAppNotifyCard() {
   return (
     <div class="card wide">
       <div class="card-head">
-        <span class="name">新应用发现通知</span>
-        {on !== null && (
-          <span class={on ? 'badge ok' : 'badge'}>{on ? '已开启' : '已关闭'}</span>
-        )}
-        <span style="margin-left:auto">
-          <Toggle checked={on ?? true} onChange={(v) => void toggleTo(v)} />
-        </span>
+        <span class="name">通知偏好</span>
+        <span class="badge">事件级开关</span>
       </div>
       <div class="card-meta muted">
-        开启时：自动扫描发现新应用并入档后，经 Bark/邮件推送「已加入档案，请核对」。
-        关闭后：仍会<b>静默自动入档</b>（档案页徽标与横幅照常），只是不发通知——嫌打扰就关。
+        控制哪些事件会推送通知（经 Bark/邮件，通道开关见下方两张卡）；未列出的成功备份保持静默。
       </div>
+      {err && <div class="banner-err">{err}</div>}
+      {prefs === null ? (
+        <div class="muted">加载中…</div>
+      ) : (
+        NOTIFY_PREF_ROWS.map((row) => (
+          <div class="pref-row" key={row.key}>
+            <div class="pref-text">
+              <div class="pref-name">{row.name}</div>
+              <div class="pref-desc muted">{row.desc}</div>
+            </div>
+            <Toggle checked={prefs[row.key]} onChange={(v) => void setPref(row.key, v)} />
+          </div>
+        ))
+      )}
       {busy && <span class="muted">保存中…</span>}
     </div>
   )
@@ -1293,7 +1319,7 @@ function Settings() {
         </form>
         <div class="card-meta muted">修改后所有已登录设备强制登出（30 天记住设备）</div>
       </div>
-      <NewAppNotifyCard />
+      <NotifyPrefsCard />
       <BarkCard />
       <EmailCard />
     </>

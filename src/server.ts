@@ -8,7 +8,7 @@ import type { Store } from './store/db.js'
 import type { Pipeline } from './core/pipeline.js'
 import type { Scheduler } from './core/scheduler.js'
 import type { Secrets } from './core/secrets.js'
-import { emailConfigFromSecrets, normalizeSmtpHost } from './core/notifier.js'
+import { emailConfigFromSecrets, normalizeSmtpHost, NOTIFY_EVENT_PREFS } from './core/notifier.js'
 import type { AlertHub } from './core/notifier.js'
 import type { AppProfile, BackupTarget, DetectedDraft, RunRecord } from './types.js'
 
@@ -407,7 +407,7 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
   app.post('/api/detect/scan-now', async () => {
     const { scanAndRegister, makeLiveDeps } = await import('./core/auto-detect.js')
     try {
-      return await scanAndRegister(store, notify, makeLiveDeps(secrets))
+      return await scanAndRegister(store, notify, makeLiveDeps())
     } catch (err) {
       return { added: [], removed: [], error: err instanceof Error ? err.message : String(err) }
     }
@@ -567,28 +567,39 @@ export async function startApi(deps: ApiDeps): Promise<{ port: number; auth: Adm
     }
   }
 
+  /** 事件级通知偏好（body 键 → secrets 键），与 NOTIFY_EVENT_PREFS 一一对应 */
+  const PREF_BODY_KEYS: Record<string, string> = {
+    backupFailed: 'NOTIFY_BACKUP_FAILED',
+    quotaPruned: 'NOTIFY_QUOTA_PRUNED',
+    newAppAdded: 'NOTIFY_NEW_APP',
+    autoRemoved: 'NOTIFY_AUTO_REMOVED',
+  }
+
+  function prefsView() {
+    const out: Record<string, boolean> = {}
+    for (const [bodyKey, secretKey] of Object.entries(PREF_BODY_KEYS)) {
+      const pref = NOTIFY_EVENT_PREFS.find((p) => p.key === secretKey)
+      const v = secrets.getOptional(secretKey)
+      out[bodyKey] = v === '0' ? false : v === '1' ? true : (pref?.defaultOn ?? true)
+    }
+    return out
+  }
+
   app.get('/api/notify/status', async () => ({
     barkConfigured: secrets.has('BARK_URL'),
     barkEnabled: secrets.getOptional('NOTIFY_BARK') !== '0',
-    newAppNotify: secrets.getOptional('NOTIFY_NEW_APP') !== '0',
+    prefs: prefsView(),
     email: emailView(),
   }))
 
-  /** 告警偏好：newAppNotify = 发现新应用是否通知；barkEnabled/emailEnabled = 失败告警通道开关（'0'=关，缺省开） */
+  /** 告警偏好：事件级通知开关（backupFailed/quotaPruned/newAppAdded/autoRemoved），'0'=关 */
   app.post('/api/notify/prefs', async (req) => {
-    const { newAppNotify, barkEnabled, emailEnabled } = (req.body ?? {}) as {
-      newAppNotify?: boolean
-      barkEnabled?: boolean
-      emailEnabled?: boolean
+    const b = (req.body ?? {}) as Record<string, unknown>
+    for (const [bodyKey, secretKey] of Object.entries(PREF_BODY_KEYS)) {
+      const v = b[bodyKey]
+      if (typeof v === 'boolean') upsertSecret(secretKey, v ? '1' : '0')
     }
-    if (typeof newAppNotify === 'boolean') upsertSecret('NOTIFY_NEW_APP', newAppNotify ? '1' : '0')
-    if (typeof barkEnabled === 'boolean') upsertSecret('NOTIFY_BARK', barkEnabled ? '1' : '0')
-    if (typeof emailEnabled === 'boolean') upsertSecret('NOTIFY_EMAIL', emailEnabled ? '1' : '0')
-    return {
-      newAppNotify: secrets.getOptional('NOTIFY_NEW_APP') !== '0',
-      barkEnabled: secrets.getOptional('NOTIFY_BARK') !== '0',
-      emailEnabled: secrets.getOptional('NOTIFY_EMAIL') !== '0',
-    }
+    return { prefs: prefsView() }
   })
 
   app.post('/api/notify/bark', async (req) => {
